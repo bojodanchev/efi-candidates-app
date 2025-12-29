@@ -115,6 +115,11 @@ export async function GET(request: NextRequest) {
         orderBy: { createdAt: "desc" },
         skip,
         take: limit,
+        include: {
+          scheduledEmails: {
+            orderBy: { emailNumber: "asc" },
+          },
+        },
       }),
       prisma.candidate.count({ where }),
     ]);

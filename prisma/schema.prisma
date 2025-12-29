@@ -44,7 +44,35 @@ model Candidate {
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
 
+  // Relations
+  scheduledEmails ScheduledEmail[]
+
   @@map("candidates")
+}
+
+model ScheduledEmail {
+  id          String   @id @default(cuid())
+  candidateId String   @map("candidate_id")
+  candidate   Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  emailNumber  Int      @map("email_number")    // 1, 2, or 3
+  templateId   Int      @map("template_id")     // Brevo template ID (3, 4, or 5)
+  subject      String                           // Email subject for display
+  scheduledFor DateTime @map("scheduled_for")   // When Brevo will send it
+
+  status    EmailStatus @default(SCHEDULED)
+  sentAt    DateTime?   @map("sent_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([candidateId, emailNumber])
+  @@map("scheduled_emails")
+}
+
+enum EmailStatus {
+  SCHEDULED
+  SENT
+  FAILED
 }
 
 enum CandidateStatus {

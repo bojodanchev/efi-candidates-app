@@ -2,6 +2,16 @@
 
 import { useEffect, useState } from "react";
 
+interface ScheduledEmail {
+  id: string;
+  emailNumber: number;
+  templateId: number;
+  subject: string;
+  scheduledFor: string;
+  status: "SCHEDULED" | "SENT" | "FAILED";
+  sentAt: string | null;
+}
+
 interface Candidate {
   id: string;
   firstName: string;
@@ -18,6 +28,8 @@ interface Candidate {
   submittedAt: string;
   reviewedAt: string | null;
   photoUrls: string[];
+  emailSequenceStartedAt: string | null;
+  scheduledEmails: ScheduledEmail[];
 }
 
 type StatusFilter = "all" | "PENDING" | "APPROVED" | "REJECTED";
@@ -447,6 +459,11 @@ export default function Home() {
                   </p>
                 </div>
               )}
+
+              {/* Email Sequence Section - Only for approved candidates */}
+              {selectedCandidate.status === "APPROVED" && selectedCandidate.scheduledEmails && selectedCandidate.scheduledEmails.length > 0 && (
+                <EmailSequenceTimeline emails={selectedCandidate.scheduledEmails} />
+              )}
             </div>
           ) : (
             <div className="flex items-center justify-center h-full">
@@ -465,6 +482,107 @@ function DetailRow({ label, value }: { label: string; value: string }) {
     <div className="flex justify-between py-2 border-b border-[#222]">
       <span className="text-[#555] text-sm">{label}</span>
       <span className="text-white text-sm">{value}</span>
+    </div>
+  );
+}
+
+// Email Sequence Timeline Component
+function EmailSequenceTimeline({ emails }: { emails: ScheduledEmail[] }) {
+  const now = new Date();
+
+  const formatDateTime = (dateString: string) => {
+    const date = new Date(dateString);
+    return date.toLocaleDateString("bg-BG", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  };
+
+  const getEmailStatus = (email: ScheduledEmail): "sent" | "pending" | "future" | "failed" => {
+    if (email.status === "FAILED") return "failed";
+    if (email.status === "SENT" || email.sentAt) return "sent";
+    const scheduledDate = new Date(email.scheduledFor);
+    if (scheduledDate <= now) return "pending"; // Should have been sent by now
+    return "future";
+  };
+
+  const statusConfig = {
+    sent: {
+      icon: "✅",
+      label: "Изпратен",
+      iconClass: "text-green-500",
+      lineClass: "bg-green-500",
+    },
+    pending: {
+      icon: "⏳",
+      label: "Изпраща се...",
+      iconClass: "text-[#c9a227] animate-pulse",
+      lineClass: "bg-[#c9a227]",
+    },
+    future: {
+      icon: "○",
+      label: "Планиран",
+      iconClass: "text-[#555]",
+      lineClass: "bg-[#333]",
+    },
+    failed: {
+      icon: "❌",
+      label: "Грешка",
+      iconClass: "text-red-500",
+      lineClass: "bg-red-500",
+    },
+  };
+
+  return (
+    <div className="mt-6">
+      <h3 className="text-xs font-semibold text-[#c9a227] uppercase tracking-wider mb-4">
+        Email последователност
+      </h3>
+      <div className="space-y-0">
+        {emails.map((email, index) => {
+          const status = getEmailStatus(email);
+          const config = statusConfig[status];
+          const isLast = index === emails.length - 1;
+
+          return (
+            <div key={email.id} className="flex gap-3">
+              {/* Timeline indicator */}
+              <div className="flex flex-col items-center">
+                <span className={`text-lg ${config.iconClass}`}>{config.icon}</span>
+                {!isLast && (
+                  <div className={`w-0.5 h-full min-h-[40px] ${config.lineClass}`} />
+                )}
+              </div>
+
+              {/* Email details */}
+              <div className="flex-1 pb-4">
+                <div className="flex items-center gap-2">
+                  <span className="text-white text-sm font-medium">
+                    Email {email.emailNumber}
+                  </span>
+                  <span className={`text-xs px-1.5 py-0.5 rounded ${
+                    status === "sent" ? "bg-green-900/30 text-green-400" :
+                    status === "pending" ? "bg-[#c9a227]/20 text-[#c9a227]" :
+                    status === "failed" ? "bg-red-900/30 text-red-400" :
+                    "bg-[#222] text-[#666]"
+                  }`}>
+                    {config.label}
+                  </span>
+                </div>
+                <p className="text-[#888] text-sm mt-0.5">{email.subject}</p>
+                <p className="text-[#555] text-xs mt-1">
+                  {status === "sent" && email.sentAt
+                    ? `Изпратен: ${formatDateTime(email.sentAt)}`
+                    : `Планиран: ${formatDateTime(email.scheduledFor)}`}
+                </p>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
