@@ -1,0 +1,54 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL_UNPOOLED")
+}
+
+model Candidate {
+  id        String   @id @default(cuid())
+
+  // Form data
+  firstName String   @map("first_name")
+  lastName  String   @map("last_name")
+  email     String   @unique
+  phone     String?
+  birthDate String?  @map("birth_date")
+  heightCm  Int?     @map("height_cm")
+  instagram String?
+  tiktok    String?
+  city      String?
+  category  String?
+
+  // Photos (URLs)
+  photoUrls String[] @map("photo_urls")
+
+  // Review status
+  status      CandidateStatus @default(PENDING)
+  reviewedAt  DateTime?       @map("reviewed_at")
+  reviewedBy  String?         @map("reviewed_by")
+
+  // Brevo integration
+  brevoContactId String? @map("brevo_contact_id")
+  emailSequenceStartedAt DateTime? @map("email_sequence_started_at")
+
+  // Telegram tracking
+  telegramMessageId String? @map("telegram_message_id")
+  telegramChatId    String? @map("telegram_chat_id")
+
+  // Metadata
+  submittedAt DateTime  @map("submitted_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@map("candidates")
+}
+
+enum CandidateStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
