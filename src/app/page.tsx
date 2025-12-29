@@ -17,7 +17,7 @@ interface Candidate {
   status: "PENDING" | "APPROVED" | "REJECTED";
   submittedAt: string;
   reviewedAt: string | null;
-  photos?: string[];
+  photoUrls: string[];
 }
 
 type StatusFilter = "all" | "PENDING" | "APPROVED" | "REJECTED";
@@ -320,30 +320,39 @@ export default function Home() {
                     />
                   )}
 
-                  {/* Submission Photos Placeholder */}
-                  {selectedCandidate.photos && selectedCandidate.photos.length > 0 ? (
-                    selectedCandidate.photos.map((photo, idx) => (
-                      <img
+                  {/* Submission Photos from Google Drive */}
+                  {selectedCandidate.photoUrls && selectedCandidate.photoUrls.length > 0 ? (
+                    selectedCandidate.photoUrls.slice(0, 3).map((photo, idx) => (
+                      <a
                         key={idx}
-                        src={photo}
-                        alt={`Photo ${idx + 1}`}
-                        className="h-32 w-32 rounded-xl object-cover border border-[#2a2a2a] cursor-pointer hover:border-[#c9a227] transition-colors"
-                      />
+                        href={photo}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block"
+                      >
+                        <img
+                          src={photo}
+                          alt={`Снимка ${idx + 1}`}
+                          className="h-32 w-32 rounded-xl object-cover border border-[#2a2a2a] cursor-pointer hover:border-[#c9a227] transition-colors"
+                          onError={(e) => {
+                            e.currentTarget.src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128"><rect fill="%231a1a1a" width="128" height="128"/><text fill="%23444" font-size="12" x="50%" y="50%" text-anchor="middle" dy=".3em">Грешка</text></svg>';
+                          }}
+                        />
+                      </a>
                     ))
                   ) : (
                     <>
                       <div className="h-32 w-32 rounded-xl bg-[#1a1a1a] border border-dashed border-[#333] flex items-center justify-center">
-                        <span className="text-[#444] text-xs text-center px-2">Снимка 1</span>
-                      </div>
-                      <div className="h-32 w-32 rounded-xl bg-[#1a1a1a] border border-dashed border-[#333] flex items-center justify-center">
-                        <span className="text-[#444] text-xs text-center px-2">Снимка 2</span>
+                        <span className="text-[#444] text-xs text-center px-2">Няма снимки</span>
                       </div>
                     </>
                   )}
                 </div>
-                <p className="text-xs text-[#444] mt-2">
-                  Снимките от кандидатурата ще бъдат добавени скоро
-                </p>
+                {selectedCandidate.photoUrls && selectedCandidate.photoUrls.length > 0 && (
+                  <p className="text-xs text-[#555] mt-2">
+                    {selectedCandidate.photoUrls.length} снимки от кандидатурата
+                  </p>
+                )}
               </div>
 
               {/* Details Section */}
