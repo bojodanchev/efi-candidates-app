@@ -1,0 +1,555 @@
+/**
+ * ============================================================
+ * EU FASHION INSTITUTE - Gmail to Sheet Extractor
+ * FINAL PRODUCTION VERSION
+ * ============================================================
+ *
+ * TWO MODES:
+ * 1. runFullBackfill()  - ONE TIME: Gets ALL historical emails
+ * 2. runIncrementalSync() - RECURRING: Gets last 2 hours only
+ *
+ * SETUP:
+ * 1. Open Google Sheet → Extensions → Apps Script
+ * 2. Delete all code, paste this entire script
+ * 3. Save (Ctrl+S)
+ * 4. Run runFullBackfill() ONCE to get all historical data
+ * 5. Run setupAutoSync() to enable 10-minute polling
+ *
+ * The auto-sync will use runIncrementalSync() which only
+ * searches the last 2 hours - very efficient on Gmail quota.
+ */
+
+// ============================================================
+// CONFIGURATION
+// ============================================================
+
+const CONFIG = {
+  // Gmail search - matches form submission emails
+  SEARCH_BASE: 'from:eufashioninstitute subject:"New message from"',
+
+  // Column structure
+  COLUMNS: {
+    DATE: 1, TIME: 2, FIRST_NAME: 3, LAST_NAME: 4, EMAIL: 5,
+    PHONE: 6, BIRTH_DATE: 7, HEIGHT: 8, INSTAGRAM: 9, TIKTOK: 10,
+    CITY: 11, CATEGORY: 12, MESSAGE_ID: 13, PHOTO_FOLDER: 14,
+    IS_MINOR: 15, PARENT_NAME: 16, PARENT_EMAIL: 17, PARENT_PHONE: 18
+  },
+  TOTAL_COLUMNS: 18,
+
+  // Google Drive folder for photos
+  DRIVE_FOLDER_NAME: 'EFI Candidates Photos',
+
+  // Incremental sync: how far back to search (in hours)
+  INCREMENTAL_HOURS: 2,
+
+  // Max emails per run to avoid timeout
+  MAX_EMAILS_PER_RUN: 100,
+
+  // Pause between batches (ms) to avoid rate limiting
+  BATCH_PAUSE: 500
+};
+
+// ============================================================
+// MAIN FUNCTIONS
+// ============================================================
+
+/**
+ * ONE-TIME FULL BACKFILL
+ * Run this ONCE to get all historical emails
+ */
+function runFullBackfill() {
+  Logger.log('========================================');
+  Logger.log('FULL BACKFILL - Getting ALL emails');
+  Logger.log('========================================');
+
+  const sheet = setupSheet();
+  const existingIds = getExistingMessageIds(sheet);
+  Logger.log(`Existing entries: ${existingIds.size}`);
+
+  // Search ALL emails (no date filter)
+  const searchQuery = CONFIG.SEARCH_BASE;
+  Logger.log(`Search query: ${searchQuery}`);
+
+  let allThreads = [];
+  let start = 0;
+  const batchSize = 100;
+
+  // Get all threads in batches
+  while (true) {
+    try {
+      const threads = GmailApp.search(searchQuery, start, batchSize);
+      if (threads.length === 0) break;
+
+      allThreads = allThreads.concat(threads);
+      start += batchSize;
+
+      Logger.log(`Fetched ${allThreads.length} threads so far...`);
+
+      // Pause between batches to avoid quota
+      Utilities.sleep(CONFIG.BATCH_PAUSE);
+
+    } catch (e) {
+      Logger.log(`Error at batch ${start}: ${e}`);
+      break;
+    }
+  }
+
+  Logger.log(`Total threads found: ${allThreads.length}`);
+
+  // Process all threads
+  const results = processThreads(allThreads, existingIds, sheet);
+
+  Logger.log('========================================');
+  Logger.log(`BACKFILL COMPLETE`);
+  Logger.log(`New entries added: ${results.added}`);
+  Logger.log(`Skipped (existing): ${results.skipped}`);
+  Logger.log(`Errors: ${results.errors}`);
+  Logger.log(`Total in sheet: ${sheet.getLastRow() - 1}`);
+  Logger.log('========================================');
+}
+
+/**
+ * INCREMENTAL SYNC
+ * Run this on a schedule - only searches last 2 hours
+ */
+function runIncrementalSync() {
+  Logger.log('========================================');
+  Logger.log(`INCREMENTAL SYNC - Last ${CONFIG.INCREMENTAL_HOURS} hours`);
+  Logger.log('========================================');
+
+  const sheet = setupSheet();
+  const existingIds = getExistingMessageIds(sheet);
+  Logger.log(`Existing entries: ${existingIds.size}`);
+
+  // Calculate date/time for search
+  const now = new Date();
+  const hoursAgo = new Date(now.getTime() - (CONFIG.INCREMENTAL_HOURS * 60 * 60 * 1000));
+  const dateStr = Utilities.formatDate(hoursAgo, Session.getScriptTimeZone(), 'yyyy/MM/dd');
+
+  const searchQuery = `${CONFIG.SEARCH_BASE} after:${dateStr}`;
+  Logger.log(`Search query: ${searchQuery}`);
+
+  let threads;
+  try {
+    threads = GmailApp.search(searchQuery, 0, CONFIG.MAX_EMAILS_PER_RUN);
+  } catch (e) {
+    Logger.log(`Gmail error: ${e}`);
+    return;
+  }
+
+  Logger.log(`Threads found: ${threads.length}`);
+
+  if (threads.length === 0) {
+    Logger.log('No new emails in the last 2 hours');
+    return;
+  }
+
+  // Process threads
+  const results = processThreads(threads, existingIds, sheet);
+
+  Logger.log('========================================');
+  Logger.log(`SYNC COMPLETE`);
+  Logger.log(`New: ${results.added}, Skipped: ${results.skipped}, Errors: ${results.errors}`);
+  Logger.log('========================================');
+}
+
+// ============================================================
+// CORE PROCESSING
+// ============================================================
+
+/**
+ * Process threads and add new entries to sheet
+ */
+function processThreads(threads, existingIds, sheet) {
+  let added = 0, skipped = 0, errors = 0;
+  const newRows = [];
+
+  // Get or create Drive folder
+  let driveFolder = null;
+  try {
+    driveFolder = getOrCreateDriveFolder();
+  } catch (e) {
+    Logger.log(`Drive folder error (photos will be skipped): ${e}`);
+  }
+
+  for (let t = 0; t < threads.length; t++) {
+    // Rate limiting
+    if (t > 0 && t % 10 === 0) {
+      Utilities.sleep(CONFIG.BATCH_PAUSE);
+    }
+
+    let messages;
+    try {
+      messages = threads[t].getMessages();
+    } catch (e) {
+      errors++;
+      continue;
+    }
+
+    for (const message of messages) {
+      const messageId = message.getId();
+
+      // Skip if already processed
+      if (existingIds.has(messageId)) {
+        skipped++;
+        continue;
+      }
+
+      // Parse email
+      let parsed;
+      try {
+        parsed = parseEmailBody(message.getPlainBody());
+      } catch (e) {
+        errors++;
+        continue;
+      }
+
+      if (!parsed || !parsed.email) {
+        continue;
+      }
+
+      // Extract photos
+      let photoFolderUrl = '';
+      if (driveFolder) {
+        try {
+          photoFolderUrl = extractPhotos(message, parsed, driveFolder);
+        } catch (e) {
+          Logger.log(`Photo error for ${parsed.email}: ${e}`);
+        }
+      }
+
+      // Build row
+      const row = buildRow(parsed, messageId, photoFolderUrl);
+      newRows.push(row);
+      existingIds.add(messageId);
+      added++;
+
+      const minorTag = parsed.isMinor ? ' [MINOR]' : '';
+      Logger.log(`✓ ${parsed.firstName} ${parsed.lastName} (${parsed.email})${minorTag}`);
+    }
+  }
+
+  // Insert new rows at top (after header)
+  if (newRows.length > 0) {
+    // Sort by date (newest first)
+    newRows.sort((a, b) => {
+      const dateA = parseDateTime(a[0], a[1]);
+      const dateB = parseDateTime(b[0], b[1]);
+      return dateB - dateA;
+    });
+
+    sheet.insertRowsAfter(1, newRows.length);
+    sheet.getRange(2, 1, newRows.length, CONFIG.TOTAL_COLUMNS).setValues(newRows);
+    sheet.autoResizeColumns(1, 12);
+  }
+
+  return { added, skipped, errors };
+}
+
+/**
+ * Parse email body - handles adult AND minor forms
+ */
+function parseEmailBody(body) {
+  if (!body) return null;
+
+  body = body.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const lines = body.split('\n');
+
+  const data = {
+    firstName: '', lastName: '', email: '', phone: '',
+    birthDate: '', height: '', instagram: '', tiktok: '',
+    city: '', category: '', date: '', time: '',
+    isMinor: false, parentName: '', parentEmail: '', parentPhone: ''
+  };
+
+  // Detect minor form
+  const isMinorForm = body.includes('кандидатстващото лице') ||
+                      body.includes('родител/настойник');
+  data.isMinor = isMinorForm;
+
+  // Label mappings
+  const labelMap = {
+    // Adult form
+    'Име': 'firstName',
+    'Фамилия': 'lastName',
+    'Email': 'email',
+    'Телефон за връзка': 'phone',
+    'Дата на раждане': 'birthDate',
+    'Височина в см.': 'height',
+    'Височина в см': 'height',
+    'Instagram link': 'instagram',
+    'Tik Tok link': 'tiktok',
+    'TikTok link': 'tiktok',
+    'Град в който живеете в момента': 'city',
+    'Категория': 'category',
+    'Date': 'date',
+    'Time': 'time',
+    // Minor form - candidate info
+    'Име на кандидатстващото лице': 'firstName',
+    'Фамилия кандидатстващото лице': 'lastName',
+    'Фамилия на кандидатстващото лице': 'lastName',
+    'Дата на раждане на кандидатстващото лице': 'birthDate',
+    'Град в който живеете в момента кандидатстващото лице': 'city',
+    // Minor form - parent info
+    'Име на родител/настойник': '_parentFirst',
+    'Фамилия на родител/настойник': '_parentLast',
+    'Фамилия на родител/настойник ': '_parentLast',
+    'Email на родител/настойник': 'parentEmail',
+    'Телефон за връзка на родител/настойник': 'parentPhone'
+  };
+
+  let parentFirst = '', parentLast = '';
+
+  for (const line of lines) {
+    const match = line.match(/^([^:]+?):{1,2}\s*(.*)$/);
+    if (!match) continue;
+
+    const label = match[1].trim();
+    let value = match[2].trim();
+    const key = labelMap[label];
+
+    if (!key) continue;
+
+    // Clean URLs
+    if (key === 'instagram' || key === 'tiktok') {
+      const urlMatch = value.match(/^(https?:\/\/[^\s]+)/);
+      value = urlMatch ? urlMatch[1] : '';
+    }
+
+    // Clean city
+    if (key === 'city') {
+      value = value.split('http')[0].split('Категория')[0].trim();
+    }
+
+    // Handle parent name parts
+    if (key === '_parentFirst') {
+      parentFirst = value;
+    } else if (key === '_parentLast') {
+      parentLast = value;
+    } else {
+      data[key] = value;
+    }
+  }
+
+  // Combine parent name
+  data.parentName = `${parentFirst} ${parentLast}`.trim();
+
+  // For minors, use parent email as primary if candidate email missing
+  if (isMinorForm && !data.email && data.parentEmail) {
+    data.email = data.parentEmail;
+  }
+  if (isMinorForm && !data.phone && data.parentPhone) {
+    data.phone = data.parentPhone;
+  }
+
+  return data.email ? data : null;
+}
+
+/**
+ * Build a row array from parsed data
+ */
+function buildRow(parsed, messageId, photoFolderUrl) {
+  const row = new Array(CONFIG.TOTAL_COLUMNS).fill('');
+  const C = CONFIG.COLUMNS;
+
+  row[C.DATE - 1] = parsed.date || '';
+  row[C.TIME - 1] = parsed.time || '';
+  row[C.FIRST_NAME - 1] = parsed.firstName || '';
+  row[C.LAST_NAME - 1] = parsed.lastName || '';
+  row[C.EMAIL - 1] = parsed.email || '';
+  row[C.PHONE - 1] = parsed.phone || '';
+  row[C.BIRTH_DATE - 1] = parsed.birthDate || '';
+  row[C.HEIGHT - 1] = parsed.height || '';
+  row[C.INSTAGRAM - 1] = parsed.instagram || '';
+  row[C.TIKTOK - 1] = parsed.tiktok || '';
+  row[C.CITY - 1] = parsed.city || '';
+  row[C.CATEGORY - 1] = parsed.category || '';
+  row[C.MESSAGE_ID - 1] = messageId;
+  row[C.PHOTO_FOLDER - 1] = photoFolderUrl;
+  row[C.IS_MINOR - 1] = parsed.isMinor ? 'Да' : 'Не';
+  row[C.PARENT_NAME - 1] = parsed.parentName || '';
+  row[C.PARENT_EMAIL - 1] = parsed.parentEmail || '';
+  row[C.PARENT_PHONE - 1] = parsed.parentPhone || '';
+
+  return row;
+}
+
+/**
+ * Extract photos to Google Drive
+ */
+function extractPhotos(message, candidateData, rootFolder) {
+  const attachments = message.getAttachments();
+  if (!attachments || attachments.length === 0) return '';
+
+  const images = attachments.filter(a =>
+    a.getContentType().toLowerCase().startsWith('image/')
+  );
+  if (images.length === 0) return '';
+
+  const folderName = `${candidateData.firstName} ${candidateData.lastName} - ${candidateData.email}`;
+
+  // Get or create folder
+  const existing = rootFolder.getFoldersByName(folderName);
+  const folder = existing.hasNext() ? existing.next() : rootFolder.createFolder(folderName);
+
+  // Save images
+  for (let i = 0; i < images.length; i++) {
+    const fileName = images[i].getName() || `photo_${i + 1}.jpg`;
+    try {
+      folder.createFile(images[i]).setName(fileName);
+    } catch (e) { /* ignore */ }
+  }
+
+  return folder.getUrl();
+}
+
+// ============================================================
+// HELPER FUNCTIONS
+// ============================================================
+
+function setupSheet() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+
+  if (sheet.getRange('A1').getValue() === '') {
+    const headers = [
+      'Date', 'Time', 'Име', 'Фамилия', 'Email', 'Телефон',
+      'Дата на раждане', 'Височина', 'Instagram', 'TikTok',
+      'Град', 'Категория', 'MessageID', 'PhotoFolderURL',
+      'Непълнолетен', 'Родител', 'Email (родител)', 'Тел (родител)'
+    ];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#f3f3f3');
+    sheet.setFrozenRows(1);
+  }
+
+  return sheet;
+}
+
+function getExistingMessageIds(sheet) {
+  const lastRow = sheet.getLastRow();
+  const ids = new Set();
+  if (lastRow < 2) return ids;
+
+  const values = sheet.getRange(2, CONFIG.COLUMNS.MESSAGE_ID, lastRow - 1, 1).getValues();
+  for (const row of values) {
+    if (row[0]) ids.add(String(row[0]));
+  }
+  return ids;
+}
+
+function getOrCreateDriveFolder() {
+  const folders = DriveApp.getFoldersByName(CONFIG.DRIVE_FOLDER_NAME);
+  return folders.hasNext() ? folders.next() : DriveApp.createFolder(CONFIG.DRIVE_FOLDER_NAME);
+}
+
+function parseDateTime(dateStr, timeStr) {
+  if (!dateStr) return new Date(0);
+  const date = new Date(dateStr);
+  if (timeStr && !isNaN(date.getTime())) {
+    const parts = String(timeStr).match(/(\d+):(\d+)/);
+    if (parts) date.setHours(parseInt(parts[1]), parseInt(parts[2]));
+  }
+  return isNaN(date.getTime()) ? new Date(0) : date;
+}
+
+// ============================================================
+// AUTO-SYNC SETUP
+// ============================================================
+
+/**
+ * Setup auto-sync (runs every 10 minutes)
+ */
+function setupAutoSync() {
+  // Remove existing triggers
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'runIncrementalSync') {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+
+  // Create new trigger
+  ScriptApp.newTrigger('runIncrementalSync')
+    .timeBased()
+    .everyMinutes(10)
+    .create();
+
+  Logger.log('✓ Auto-sync enabled (every 10 minutes)');
+  Logger.log('Will search only last 2 hours each run.');
+
+  try {
+    SpreadsheetApp.getUi().alert(
+      'Auto-sync enabled!\n\n' +
+      'The script will run every 10 minutes and search\n' +
+      'only the last 2 hours for new submissions.\n\n' +
+      'This is very efficient on Gmail quota.'
+    );
+  } catch (e) {}
+}
+
+/**
+ * Remove auto-sync
+ */
+function removeAutoSync() {
+  let removed = 0;
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'runIncrementalSync') {
+      ScriptApp.deleteTrigger(t);
+      removed++;
+    }
+  });
+  Logger.log(`Removed ${removed} trigger(s)`);
+}
+
+// ============================================================
+// MENU
+// ============================================================
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('🎯 EFI Tools')
+    .addItem('📥 Full Backfill (ALL emails)', 'runFullBackfill')
+    .addItem('🔄 Incremental Sync (last 2h)', 'runIncrementalSync')
+    .addSeparator()
+    .addItem('⏰ Setup Auto-Sync (10 min)', 'setupAutoSync')
+    .addItem('⏹️ Remove Auto-Sync', 'removeAutoSync')
+    .addSeparator()
+    .addItem('📊 Sort by Date', 'sortByDate')
+    .addItem('🗑️ Remove Duplicates', 'removeDuplicates')
+    .addToUi();
+}
+
+function sortByDate() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 3) return;
+
+  sheet.getRange(2, 1, lastRow - 1, CONFIG.TOTAL_COLUMNS).sort([
+    {column: 1, ascending: false},
+    {column: 2, ascending: false}
+  ]);
+
+  SpreadsheetApp.getUi().alert('Sorted by date (newest first)');
+}
+
+function removeDuplicates() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+
+  const data = sheet.getRange(2, 1, lastRow - 1, CONFIG.TOTAL_COLUMNS).getValues();
+  const seen = new Set();
+  const toDelete = [];
+
+  for (let i = 0; i < data.length; i++) {
+    const key = data[i][CONFIG.COLUMNS.MESSAGE_ID - 1] ||
+                String(data[i][CONFIG.COLUMNS.EMAIL - 1]).toLowerCase();
+    if (seen.has(key)) {
+      toDelete.push(i + 2);
+    } else {
+      seen.add(key);
+    }
+  }
+
+  toDelete.reverse().forEach(row => sheet.deleteRow(row));
+  SpreadsheetApp.getUi().alert(`Removed ${toDelete.length} duplicate(s)`);
+}

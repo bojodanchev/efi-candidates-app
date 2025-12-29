@@ -1,0 +1,415 @@
+/**
+ * ============================================================
+ * EU FASHION INSTITUTE - Sheet to Web App Pusher
+ * FINAL PRODUCTION VERSION
+ * ============================================================
+ *
+ * This script pushes candidates from Google Sheet to the Web App.
+ * Works with the Gmail extraction script's 18-column format.
+ *
+ * SETUP:
+ * 1. In the same Google Sheet, go to Extensions → Apps Script
+ * 2. Create a NEW file: File → New → Script
+ * 3. Name it "PushToWebApp"
+ * 4. Paste this entire script
+ * 5. Go to Project Settings (⚙️) → Script Properties
+ * 6. Add property:
+ *    Name:  API_KEY
+ *    Value: 2214e1a8a20448ccb36cecb5fd079d7a0747b52c6da3f3872d15ad0d0743a0fd
+ * 7. Save and run testConnection() to verify
+ * 8. Run setupAutoPush() to enable automatic pushing
+ */
+
+// ============================================================
+// CONFIGURATION
+// ============================================================
+
+const PUSH_CONFIG = {
+  // Your Vercel deployment URL
+  WEB_APP_URL: 'https://efi-candidates-app.vercel.app/api/candidates',
+
+  // Script property key for tracking progress
+  LAST_ROW_KEY: 'LAST_PUSHED_ROW',
+
+  // Column indices (0-based, matching extraction script)
+  COL: {
+    DATE: 0, TIME: 1, FIRST_NAME: 2, LAST_NAME: 3, EMAIL: 4,
+    PHONE: 5, BIRTH_DATE: 6, HEIGHT: 7, INSTAGRAM: 8, TIKTOK: 9,
+    CITY: 10, CATEGORY: 11, MESSAGE_ID: 12, PHOTO_FOLDER: 13,
+    IS_MINOR: 14, PARENT_NAME: 15, PARENT_EMAIL: 16, PARENT_PHONE: 17
+  },
+
+  TOTAL_COLUMNS: 18
+};
+
+// ============================================================
+// MAIN PUSH FUNCTION
+// ============================================================
+
+/**
+ * Push new candidates to the web app
+ */
+function pushNewCandidates() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const props = PropertiesService.getScriptProperties();
+  const apiKey = props.getProperty('API_KEY');
+
+  if (!apiKey) {
+    Logger.log('❌ ERROR: API_KEY not set!');
+    Logger.log('Go to Project Settings → Script Properties → Add API_KEY');
+    return;
+  }
+
+  const lastPushedRow = parseInt(props.getProperty(PUSH_CONFIG.LAST_ROW_KEY) || '1');
+  const lastRow = sheet.getLastRow();
+
+  Logger.log(`Last pushed: row ${lastPushedRow}`);
+  Logger.log(`Current last: row ${lastRow}`);
+
+  if (lastRow <= lastPushedRow) {
+    Logger.log('✓ No new rows to push');
+    return;
+  }
+
+  // Get new rows
+  const numNewRows = lastRow - lastPushedRow;
+  const rows = sheet.getRange(lastPushedRow + 1, 1, numNewRows, PUSH_CONFIG.TOTAL_COLUMNS).getValues();
+
+  let pushed = 0, skipped = 0, errors = 0;
+  const C = PUSH_CONFIG.COL;
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const email = row[C.EMAIL];
+
+    // Skip if no email
+    if (!email) {
+      skipped++;
+      continue;
+    }
+
+    // Build candidate object
+    const candidate = {
+      submittedAt: formatDate(row[C.DATE]),
+      time: row[C.TIME] || '',
+      firstName: row[C.FIRST_NAME] || '',
+      lastName: row[C.LAST_NAME] || '',
+      email: email,
+      phone: String(row[C.PHONE] || ''),
+      birthDate: formatDate(row[C.BIRTH_DATE]),
+      height: row[C.HEIGHT] || '',
+      instagram: row[C.INSTAGRAM] || '',
+      tiktok: row[C.TIKTOK] || '',
+      city: row[C.CITY] || '',
+      category: row[C.CATEGORY] || '',
+      isMinor: row[C.IS_MINOR] === 'Да',
+      parentName: row[C.PARENT_NAME] || '',
+      parentEmail: row[C.PARENT_EMAIL] || '',
+      parentPhone: row[C.PARENT_PHONE] || '',
+      photoUrls: []
+    };
+
+    // Get photo URLs from Drive folder
+    const folderUrl = row[C.PHOTO_FOLDER];
+    if (folderUrl) {
+      try {
+        candidate.photoUrls = getPhotoUrls(folderUrl);
+      } catch (e) {
+        Logger.log(`  Photo error: ${e}`);
+      }
+    }
+
+    // Send to API
+    try {
+      const response = UrlFetchApp.fetch(PUSH_CONFIG.WEB_APP_URL, {
+        method: 'POST',
+        contentType: 'application/json',
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+        payload: JSON.stringify(candidate),
+        muteHttpExceptions: true
+      });
+
+      const code = response.getResponseCode();
+
+      if (code === 200 || code === 201) {
+        pushed++;
+        const photoCount = candidate.photoUrls.length;
+        Logger.log(`✓ ${candidate.firstName} ${candidate.lastName} (${photoCount} photos)`);
+      } else if (code === 409) {
+        skipped++;
+        Logger.log(`○ Already exists: ${email}`);
+      } else {
+        errors++;
+        Logger.log(`✗ Error ${code}: ${email}`);
+      }
+    } catch (e) {
+      errors++;
+      Logger.log(`✗ Network error: ${e}`);
+    }
+
+    // Small delay
+    Utilities.sleep(100);
+  }
+
+  // Update last pushed row
+  props.setProperty(PUSH_CONFIG.LAST_ROW_KEY, String(lastRow));
+
+  Logger.log('========================================');
+  Logger.log(`PUSH COMPLETE`);
+  Logger.log(`Pushed: ${pushed}`);
+  Logger.log(`Skipped: ${skipped}`);
+  Logger.log(`Errors: ${errors}`);
+  Logger.log('========================================');
+}
+
+/**
+ * Push ALL rows (reset and re-push)
+ */
+function pushAllCandidates() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.alert(
+    'Push All Candidates',
+    'This will attempt to push ALL candidates in the sheet.\n' +
+    'Existing ones will be skipped (409).\n\nContinue?',
+    ui.ButtonSet.YES_NO
+  );
+
+  if (response !== ui.Button.YES) return;
+
+  // Reset last pushed row
+  PropertiesService.getScriptProperties().setProperty(PUSH_CONFIG.LAST_ROW_KEY, '1');
+
+  // Run push
+  pushNewCandidates();
+}
+
+// ============================================================
+// PHOTO URL EXTRACTION
+// ============================================================
+
+/**
+ * Get photo URLs from a Google Drive folder
+ */
+function getPhotoUrls(folderUrl) {
+  const urls = [];
+  if (!folderUrl) return urls;
+
+  // Extract folder ID
+  const match = folderUrl.match(/folders\/([a-zA-Z0-9_-]+)/);
+  if (!match) return urls;
+
+  try {
+    const folder = DriveApp.getFolderById(match[1]);
+    const files = folder.getFiles();
+
+    while (files.hasNext()) {
+      const file = files.next();
+
+      if (file.getMimeType().startsWith('image/')) {
+        // Make publicly viewable
+        try {
+          file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+        } catch (e) { /* already shared */ }
+
+        // Add direct URL
+        urls.push(`https://drive.google.com/uc?id=${file.getId()}`);
+      }
+    }
+  } catch (e) {
+    Logger.log(`Folder error: ${e}`);
+  }
+
+  return urls;
+}
+
+/**
+ * Format date value
+ */
+function formatDate(value) {
+  if (!value) return '';
+  if (typeof value === 'string') return value;
+  if (value instanceof Date) {
+    return Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+  return String(value);
+}
+
+// ============================================================
+// SETUP & UTILITY
+// ============================================================
+
+/**
+ * Test connection to web app
+ */
+function testConnection() {
+  const apiKey = PropertiesService.getScriptProperties().getProperty('API_KEY');
+
+  if (!apiKey) {
+    Logger.log('❌ API_KEY not set!');
+    Logger.log('Go to Project Settings → Script Properties → Add API_KEY');
+    return;
+  }
+
+  Logger.log('Testing connection...');
+
+  const testData = {
+    firstName: 'Test',
+    lastName: 'Connection',
+    email: `test-${Date.now()}@test.com`,
+    phone: '0888000000',
+    birthDate: '2000-01-01',
+    height: 170,
+    city: 'Test',
+    category: 'Test',
+    submittedAt: new Date().toISOString(),
+    photoUrls: []
+  };
+
+  try {
+    const response = UrlFetchApp.fetch(PUSH_CONFIG.WEB_APP_URL, {
+      method: 'POST',
+      contentType: 'application/json',
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+      payload: JSON.stringify(testData),
+      muteHttpExceptions: true
+    });
+
+    const code = response.getResponseCode();
+    Logger.log(`Response code: ${code}`);
+
+    if (code === 201) {
+      Logger.log('✓ SUCCESS! Connection working.');
+      Logger.log('Test candidate created - you should see it in Telegram.');
+    } else if (code === 401) {
+      Logger.log('✗ Authentication failed. Check your API_KEY.');
+    } else {
+      Logger.log(`✗ Unexpected response: ${response.getContentText()}`);
+    }
+  } catch (e) {
+    Logger.log(`✗ Connection error: ${e}`);
+  }
+}
+
+/**
+ * Setup auto-push (every 10 minutes)
+ */
+function setupAutoPush() {
+  // Remove existing
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'pushNewCandidates') {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+
+  // Create new trigger
+  ScriptApp.newTrigger('pushNewCandidates')
+    .timeBased()
+    .everyMinutes(10)
+    .create();
+
+  Logger.log('✓ Auto-push enabled (every 10 minutes)');
+
+  try {
+    SpreadsheetApp.getUi().alert(
+      'Auto-push enabled!\n\n' +
+      'New candidates will be pushed to the web app\n' +
+      'every 10 minutes automatically.'
+    );
+  } catch (e) {}
+}
+
+/**
+ * Remove auto-push
+ */
+function removeAutoPush() {
+  let removed = 0;
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'pushNewCandidates') {
+      ScriptApp.deleteTrigger(t);
+      removed++;
+    }
+  });
+  Logger.log(`Removed ${removed} trigger(s)`);
+}
+
+/**
+ * Push a single candidate by email
+ */
+function pushSingleCandidate() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.prompt('Push Single', 'Enter email address:', ui.ButtonSet.OK_CANCEL);
+
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+
+  const targetEmail = response.getResponseText().trim().toLowerCase();
+  if (!targetEmail) return;
+
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+  const data = sheet.getRange(2, 1, lastRow - 1, PUSH_CONFIG.TOTAL_COLUMNS).getValues();
+
+  const apiKey = PropertiesService.getScriptProperties().getProperty('API_KEY');
+  if (!apiKey) {
+    ui.alert('API_KEY not set!');
+    return;
+  }
+
+  const C = PUSH_CONFIG.COL;
+
+  for (const row of data) {
+    if (String(row[C.EMAIL]).toLowerCase() === targetEmail) {
+      const candidate = {
+        submittedAt: formatDate(row[C.DATE]),
+        firstName: row[C.FIRST_NAME] || '',
+        lastName: row[C.LAST_NAME] || '',
+        email: row[C.EMAIL],
+        phone: String(row[C.PHONE] || ''),
+        birthDate: formatDate(row[C.BIRTH_DATE]),
+        height: row[C.HEIGHT] || '',
+        instagram: row[C.INSTAGRAM] || '',
+        tiktok: row[C.TIKTOK] || '',
+        city: row[C.CITY] || '',
+        category: row[C.CATEGORY] || '',
+        photoUrls: row[C.PHOTO_FOLDER] ? getPhotoUrls(row[C.PHOTO_FOLDER]) : []
+      };
+
+      const resp = UrlFetchApp.fetch(PUSH_CONFIG.WEB_APP_URL, {
+        method: 'POST',
+        contentType: 'application/json',
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+        payload: JSON.stringify(candidate),
+        muteHttpExceptions: true
+      });
+
+      const code = resp.getResponseCode();
+      if (code === 201) {
+        ui.alert(`✓ Pushed: ${candidate.firstName} ${candidate.lastName}\n${candidate.photoUrls.length} photos`);
+      } else if (code === 409) {
+        ui.alert(`Already exists: ${targetEmail}`);
+      } else {
+        ui.alert(`Error: ${resp.getContentText()}`);
+      }
+      return;
+    }
+  }
+
+  ui.alert(`Not found: ${targetEmail}`);
+}
+
+// ============================================================
+// MENU
+// ============================================================
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('🚀 Push to App')
+    .addItem('📤 Push New Candidates', 'pushNewCandidates')
+    .addItem('📤 Push ALL Candidates', 'pushAllCandidates')
+    .addItem('📤 Push Single (by email)', 'pushSingleCandidate')
+    .addSeparator()
+    .addItem('🔌 Test Connection', 'testConnection')
+    .addSeparator()
+    .addItem('⏰ Setup Auto-Push (10 min)', 'setupAutoPush')
+    .addItem('⏹️ Remove Auto-Push', 'removeAutoPush')
+    .addToUi();
+}
