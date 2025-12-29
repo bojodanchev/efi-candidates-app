@@ -1,0 +1,256 @@
+/**
+ * EU Fashion Institute - Sheet to Web App Pusher
+ * Pushes new candidates from Google Sheet to the web app
+ *
+ * SETUP:
+ * 1. Open your Google Sheet with candidates
+ * 2. Go to Extensions → Apps Script
+ * 3. Create a NEW script file (don't add to existing extraction script)
+ * 4. Paste this code
+ * 5. Go to Project Settings (gear icon) → Script Properties
+ * 6. Add property: API_KEY = 2214e1a8a20448ccb36cecb5fd079d7a0747b52c6da3f3872d15ad0d0743a0fd
+ * 7. Run setupPushTrigger() once to enable automatic pushing
+ */
+
+// Configuration
+const PUSH_CONFIG = {
+  WEB_APP_URL: 'https://efi-candidates-app.vercel.app/api/candidates',
+  LAST_ROW_KEY: 'LAST_PUSHED_ROW'
+};
+
+/**
+ * Main function - Push new candidates to web app
+ */
+function pushNewCandidatesToWebApp() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const props = PropertiesService.getScriptProperties();
+  const apiKey = props.getProperty('API_KEY');
+
+  if (!apiKey) {
+    Logger.log('ERROR: API_KEY not set in Script Properties!');
+    Logger.log('Go to Project Settings → Script Properties → Add API_KEY');
+    return;
+  }
+
+  // Get last pushed row (start from 1 to skip header)
+  const lastPushedRow = parseInt(props.getProperty(PUSH_CONFIG.LAST_ROW_KEY) || '1');
+  const lastRow = sheet.getLastRow();
+
+  Logger.log(`Last pushed row: ${lastPushedRow}, Current last row: ${lastRow}`);
+
+  if (lastRow <= lastPushedRow) {
+    Logger.log('No new rows to push');
+    return;
+  }
+
+  // Get new rows
+  const numNewRows = lastRow - lastPushedRow;
+  const newRows = sheet.getRange(lastPushedRow + 1, 1, numNewRows, 12).getValues();
+
+  let pushedCount = 0;
+  let skippedCount = 0;
+  let errorCount = 0;
+
+  for (let i = 0; i < newRows.length; i++) {
+    const row = newRows[i];
+
+    // Build candidate object matching sheet columns
+    // Columns: Date, Time, Име, Фамилия, Email, Телефон, Дата на раждане, Височина, Instagram, TikTok, Град, Категория
+    const candidate = {
+      submittedAt: formatDate(row[0]),  // Date
+      time: row[1],                      // Time
+      firstName: row[2],                 // Име
+      lastName: row[3],                  // Фамилия
+      email: row[4],                     // Email
+      phone: String(row[5] || ''),       // Телефон
+      birthDate: formatDate(row[6]),     // Дата на раждане
+      height: row[7],                    // Височина
+      instagram: row[8],                 // Instagram
+      tiktok: row[9],                    // TikTok
+      city: row[10],                     // Град
+      category: row[11]                  // Категория
+    };
+
+    // Skip rows without email
+    if (!candidate.email) {
+      skippedCount++;
+      continue;
+    }
+
+    try {
+      const response = UrlFetchApp.fetch(PUSH_CONFIG.WEB_APP_URL, {
+        method: 'POST',
+        contentType: 'application/json',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`
+        },
+        payload: JSON.stringify(candidate),
+        muteHttpExceptions: true
+      });
+
+      const responseCode = response.getResponseCode();
+      const responseText = response.getContentText();
+
+      if (responseCode === 200 || responseCode === 201) {
+        pushedCount++;
+        Logger.log(`✓ Pushed: ${candidate.email}`);
+      } else if (responseCode === 409) {
+        // Already exists - not an error
+        skippedCount++;
+        Logger.log(`○ Already exists: ${candidate.email}`);
+      } else {
+        errorCount++;
+        Logger.log(`✗ Failed to push ${candidate.email}: ${responseCode} - ${responseText}`);
+      }
+    } catch (e) {
+      errorCount++;
+      Logger.log(`✗ Error pushing ${candidate.email}: ${e}`);
+    }
+
+    // Small delay to avoid rate limiting
+    Utilities.sleep(100);
+  }
+
+  // Update last pushed row
+  props.setProperty(PUSH_CONFIG.LAST_ROW_KEY, lastRow.toString());
+
+  Logger.log(`\n=== PUSH COMPLETE ===`);
+  Logger.log(`Pushed: ${pushedCount}`);
+  Logger.log(`Skipped (no email or duplicate): ${skippedCount}`);
+  Logger.log(`Errors: ${errorCount}`);
+  Logger.log(`New last pushed row: ${lastRow}`);
+}
+
+/**
+ * Format date for API
+ */
+function formatDate(value) {
+  if (!value) return '';
+
+  // If it's already a string, return it
+  if (typeof value === 'string') return value;
+
+  // If it's a Date object, format it
+  if (value instanceof Date) {
+    return Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+
+  return String(value);
+}
+
+/**
+ * Set up automatic pushing every 10 minutes
+ * Run this function ONCE to create the trigger
+ */
+function setupPushTrigger() {
+  // Remove existing triggers for this function
+  const triggers = ScriptApp.getProjectTriggers();
+  for (const trigger of triggers) {
+    if (trigger.getHandlerFunction() === 'pushNewCandidatesToWebApp') {
+      ScriptApp.deleteTrigger(trigger);
+      Logger.log('Removed existing trigger');
+    }
+  }
+
+  // Create new trigger - runs every 10 minutes
+  ScriptApp.newTrigger('pushNewCandidatesToWebApp')
+    .timeBased()
+    .everyMinutes(10)
+    .create();
+
+  Logger.log('✓ Push trigger created: pushNewCandidatesToWebApp will run every 10 minutes');
+  Logger.log('New candidates from the sheet will automatically be sent to the web app');
+}
+
+/**
+ * Remove the auto-push trigger
+ */
+function removePushTrigger() {
+  const triggers = ScriptApp.getProjectTriggers();
+  let removed = 0;
+  for (const trigger of triggers) {
+    if (trigger.getHandlerFunction() === 'pushNewCandidatesToWebApp') {
+      ScriptApp.deleteTrigger(trigger);
+      removed++;
+    }
+  }
+  Logger.log(`Removed ${removed} trigger(s) for pushNewCandidatesToWebApp`);
+}
+
+/**
+ * Reset the last pushed row counter
+ * Use this to re-push all candidates from the beginning
+ */
+function resetLastPushedRow() {
+  PropertiesService.getScriptProperties().setProperty(PUSH_CONFIG.LAST_ROW_KEY, '1');
+  Logger.log('Reset last pushed row to 1 (will re-push all candidates on next run)');
+}
+
+/**
+ * Test the connection to the web app
+ */
+function testConnection() {
+  const props = PropertiesService.getScriptProperties();
+  const apiKey = props.getProperty('API_KEY');
+
+  if (!apiKey) {
+    Logger.log('ERROR: API_KEY not set!');
+    Logger.log('Go to Project Settings → Script Properties → Add API_KEY');
+    return;
+  }
+
+  // Test with a dummy candidate
+  const testCandidate = {
+    firstName: 'Test',
+    lastName: 'Connection',
+    email: `test-${Date.now()}@test.com`,
+    phone: '0888000000',
+    birthDate: '2000-01-01',
+    height: 170,
+    city: 'Test City',
+    category: 'Test Category',
+    submittedAt: new Date().toISOString()
+  };
+
+  try {
+    const response = UrlFetchApp.fetch(PUSH_CONFIG.WEB_APP_URL, {
+      method: 'POST',
+      contentType: 'application/json',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`
+      },
+      payload: JSON.stringify(testCandidate),
+      muteHttpExceptions: true
+    });
+
+    Logger.log(`Response code: ${response.getResponseCode()}`);
+    Logger.log(`Response: ${response.getContentText()}`);
+
+    if (response.getResponseCode() === 201) {
+      Logger.log('✓ Connection successful! Test candidate was created.');
+      Logger.log('You should see it in your Telegram and on the dashboard.');
+    } else if (response.getResponseCode() === 401) {
+      Logger.log('✗ Authentication failed! Check your API_KEY.');
+    } else {
+      Logger.log('✗ Unexpected response. Check the web app logs.');
+    }
+  } catch (e) {
+    Logger.log(`✗ Connection error: ${e}`);
+  }
+}
+
+/**
+ * Menu for easy access
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('EFI Web App')
+    .addItem('Push New Candidates Now', 'pushNewCandidatesToWebApp')
+    .addItem('Test Connection', 'testConnection')
+    .addSeparator()
+    .addItem('Setup Auto-Push (Every 10 min)', 'setupPushTrigger')
+    .addItem('Remove Auto-Push', 'removePushTrigger')
+    .addSeparator()
+    .addItem('Reset (Re-push All)', 'resetLastPushedRow')
+    .addToUi();
+}
