@@ -1,0 +1,417 @@
+/**
+ * EU Fashion Institute - Sheet to Web App Pusher v2
+ * With Photo URL support
+ *
+ * SETUP:
+ * 1. Open your Google Sheet with candidates
+ * 2. Go to Extensions → Apps Script
+ * 3. Create a NEW script file (don't replace extraction script)
+ * 4. Paste this code
+ * 5. Go to Project Settings (gear icon) → Script Properties
+ * 6. Add property: API_KEY = 2214e1a8a20448ccb36cecb5fd079d7a0747b52c6da3f3872d15ad0d0743a0fd
+ * 7. Run setupPushTrigger() once to enable automatic pushing
+ */
+
+// Configuration
+const PUSH_CONFIG = {
+  WEB_APP_URL: 'https://efi-candidates-app.vercel.app/api/candidates',
+  LAST_ROW_KEY: 'LAST_PUSHED_ROW',
+  PHOTO_FOLDER_COLUMN: 14  // Column N - PhotoFolderURL
+};
+
+/**
+ * Main function - Push new candidates to web app
+ */
+function pushNewCandidatesToWebApp() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const props = PropertiesService.getScriptProperties();
+  const apiKey = props.getProperty('API_KEY');
+
+  if (!apiKey) {
+    Logger.log('ERROR: API_KEY not set in Script Properties!');
+    Logger.log('Go to Project Settings → Script Properties → Add API_KEY');
+    return;
+  }
+
+  // Get last pushed row (start from 1 to skip header)
+  const lastPushedRow = parseInt(props.getProperty(PUSH_CONFIG.LAST_ROW_KEY) || '1');
+  const lastRow = sheet.getLastRow();
+
+  Logger.log(`Last pushed row: ${lastPushedRow}, Current last row: ${lastRow}`);
+
+  if (lastRow <= lastPushedRow) {
+    Logger.log('No new rows to push');
+    return;
+  }
+
+  // Get new rows (now 14 columns including PhotoFolderURL)
+  const numNewRows = lastRow - lastPushedRow;
+  const newRows = sheet.getRange(lastPushedRow + 1, 1, numNewRows, 14).getValues();
+
+  let pushedCount = 0;
+  let skippedCount = 0;
+  let errorCount = 0;
+
+  for (let i = 0; i < newRows.length; i++) {
+    const row = newRows[i];
+
+    // Build candidate object matching sheet columns
+    // Columns: Date, Time, Име, Фамилия, Email, Телефон, Дата на раждане, Височина, Instagram, TikTok, Град, Категория, MessageID, PhotoFolderURL
+    const candidate = {
+      submittedAt: formatDate(row[0]),       // A - Date
+      time: row[1],                           // B - Time
+      firstName: row[2],                      // C - Име
+      lastName: row[3],                       // D - Фамилия
+      email: row[4],                          // E - Email
+      phone: String(row[5] || ''),            // F - Телефон
+      birthDate: formatDate(row[6]),          // G - Дата на раждане
+      height: row[7],                         // H - Височина
+      instagram: row[8],                      // I - Instagram
+      tiktok: row[9],                         // J - TikTok
+      city: row[10],                          // K - Град
+      category: row[11],                      // L - Категория
+      photoFolderUrl: row[13] || ''           // N - PhotoFolderURL (skip M which is MessageID)
+    };
+
+    // Skip rows without email
+    if (!candidate.email) {
+      skippedCount++;
+      continue;
+    }
+
+    // If we have a Google Drive folder URL, get individual file URLs
+    if (candidate.photoFolderUrl) {
+      try {
+        candidate.photoUrls = getPhotoUrlsFromFolder(candidate.photoFolderUrl);
+      } catch (e) {
+        Logger.log(`Could not get photo URLs for ${candidate.email}: ${e}`);
+        candidate.photoUrls = [];
+      }
+    } else {
+      candidate.photoUrls = [];
+    }
+
+    try {
+      const response = UrlFetchApp.fetch(PUSH_CONFIG.WEB_APP_URL, {
+        method: 'POST',
+        contentType: 'application/json',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`
+        },
+        payload: JSON.stringify(candidate),
+        muteHttpExceptions: true
+      });
+
+      const responseCode = response.getResponseCode();
+      const responseText = response.getContentText();
+
+      if (responseCode === 200 || responseCode === 201) {
+        pushedCount++;
+        const photoCount = candidate.photoUrls ? candidate.photoUrls.length : 0;
+        Logger.log(`✓ Pushed: ${candidate.email} (${photoCount} photos)`);
+      } else if (responseCode === 409) {
+        // Already exists - not an error
+        skippedCount++;
+        Logger.log(`○ Already exists: ${candidate.email}`);
+      } else {
+        errorCount++;
+        Logger.log(`✗ Failed to push ${candidate.email}: ${responseCode} - ${responseText}`);
+      }
+    } catch (e) {
+      errorCount++;
+      Logger.log(`✗ Error pushing ${candidate.email}: ${e}`);
+    }
+
+    // Small delay to avoid rate limiting
+    Utilities.sleep(100);
+  }
+
+  // Update last pushed row
+  props.setProperty(PUSH_CONFIG.LAST_ROW_KEY, lastRow.toString());
+
+  Logger.log(`\n=== PUSH COMPLETE ===`);
+  Logger.log(`Pushed: ${pushedCount}`);
+  Logger.log(`Skipped (no email or duplicate): ${skippedCount}`);
+  Logger.log(`Errors: ${errorCount}`);
+  Logger.log(`New last pushed row: ${lastRow}`);
+}
+
+/**
+ * Get individual photo URLs from a Google Drive folder
+ * Makes photos publicly viewable and returns their URLs
+ */
+function getPhotoUrlsFromFolder(folderUrl) {
+  const urls = [];
+
+  if (!folderUrl) return urls;
+
+  try {
+    // Extract folder ID from URL
+    // URLs can be:
+    // https://drive.google.com/drive/folders/FOLDER_ID
+    // https://drive.google.com/drive/u/0/folders/FOLDER_ID
+    const match = folderUrl.match(/folders\/([a-zA-Z0-9_-]+)/);
+
+    if (!match) {
+      Logger.log(`Could not extract folder ID from: ${folderUrl}`);
+      return urls;
+    }
+
+    const folderId = match[1];
+    const folder = DriveApp.getFolderById(folderId);
+    const files = folder.getFiles();
+
+    while (files.hasNext()) {
+      const file = files.next();
+      const mimeType = file.getMimeType();
+
+      // Only process images
+      if (mimeType.startsWith('image/')) {
+        // Make file publicly viewable
+        try {
+          file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+        } catch (e) {
+          // File might already be shared
+        }
+
+        // Get direct view URL
+        // Format: https://drive.google.com/uc?id=FILE_ID
+        const fileId = file.getId();
+        const directUrl = `https://drive.google.com/uc?id=${fileId}`;
+        urls.push(directUrl);
+      }
+    }
+
+    Logger.log(`Found ${urls.length} photos in folder`);
+
+  } catch (e) {
+    Logger.log(`Error accessing folder: ${e}`);
+  }
+
+  return urls;
+}
+
+/**
+ * Format date for API
+ */
+function formatDate(value) {
+  if (!value) return '';
+
+  if (typeof value === 'string') return value;
+
+  if (value instanceof Date) {
+    return Utilities.formatDate(value, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+
+  return String(value);
+}
+
+/**
+ * Set up automatic pushing every 10 minutes
+ * Run this function ONCE to create the trigger
+ */
+function setupPushTrigger() {
+  // Remove existing triggers for this function
+  const triggers = ScriptApp.getProjectTriggers();
+  for (const trigger of triggers) {
+    if (trigger.getHandlerFunction() === 'pushNewCandidatesToWebApp') {
+      ScriptApp.deleteTrigger(trigger);
+      Logger.log('Removed existing trigger');
+    }
+  }
+
+  // Create new trigger - runs every 10 minutes
+  ScriptApp.newTrigger('pushNewCandidatesToWebApp')
+    .timeBased()
+    .everyMinutes(10)
+    .create();
+
+  Logger.log('✓ Push trigger created: pushNewCandidatesToWebApp will run every 10 minutes');
+  Logger.log('New candidates from the sheet will automatically be sent to the web app');
+
+  try {
+    SpreadsheetApp.getUi().alert('Auto-push enabled! Script will run every 10 minutes.');
+  } catch (e) {}
+}
+
+/**
+ * Remove the auto-push trigger
+ */
+function removePushTrigger() {
+  const triggers = ScriptApp.getProjectTriggers();
+  let removed = 0;
+  for (const trigger of triggers) {
+    if (trigger.getHandlerFunction() === 'pushNewCandidatesToWebApp') {
+      ScriptApp.deleteTrigger(trigger);
+      removed++;
+    }
+  }
+  Logger.log(`Removed ${removed} trigger(s) for pushNewCandidatesToWebApp`);
+
+  try {
+    SpreadsheetApp.getUi().alert(`Removed ${removed} auto-push trigger(s)`);
+  } catch (e) {}
+}
+
+/**
+ * Reset the last pushed row counter
+ * Use this to re-push all candidates from the beginning
+ */
+function resetLastPushedRow() {
+  PropertiesService.getScriptProperties().setProperty(PUSH_CONFIG.LAST_ROW_KEY, '1');
+  Logger.log('Reset last pushed row to 1 (will re-push all candidates on next run)');
+
+  try {
+    SpreadsheetApp.getUi().alert('Reset complete. Next run will push all candidates.');
+  } catch (e) {}
+}
+
+/**
+ * Test the connection to the web app
+ */
+function testConnection() {
+  const props = PropertiesService.getScriptProperties();
+  const apiKey = props.getProperty('API_KEY');
+
+  if (!apiKey) {
+    Logger.log('ERROR: API_KEY not set!');
+    Logger.log('Go to Project Settings → Script Properties → Add API_KEY');
+    return;
+  }
+
+  // Test with a dummy candidate
+  const testCandidate = {
+    firstName: 'Test',
+    lastName: 'Connection',
+    email: `test-${Date.now()}@test.com`,
+    phone: '0888000000',
+    birthDate: '2000-01-01',
+    height: 170,
+    city: 'Test City',
+    category: 'Test Category',
+    submittedAt: new Date().toISOString(),
+    photoUrls: ['https://via.placeholder.com/300x400.png?text=Test+Photo']
+  };
+
+  try {
+    const response = UrlFetchApp.fetch(PUSH_CONFIG.WEB_APP_URL, {
+      method: 'POST',
+      contentType: 'application/json',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`
+      },
+      payload: JSON.stringify(testCandidate),
+      muteHttpExceptions: true
+    });
+
+    Logger.log(`Response code: ${response.getResponseCode()}`);
+    Logger.log(`Response: ${response.getContentText()}`);
+
+    if (response.getResponseCode() === 201) {
+      Logger.log('✓ Connection successful! Test candidate was created.');
+      Logger.log('You should see it in your Telegram and on the dashboard.');
+    } else if (response.getResponseCode() === 401) {
+      Logger.log('✗ Authentication failed! Check your API_KEY.');
+    } else {
+      Logger.log('✗ Unexpected response. Check the web app logs.');
+    }
+  } catch (e) {
+    Logger.log(`✗ Connection error: ${e}`);
+  }
+}
+
+/**
+ * Push a single candidate by email (for testing)
+ */
+function pushSingleCandidate() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.prompt('Push Single Candidate', 'Enter the email address:', ui.ButtonSet.OK_CANCEL);
+
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+
+  const targetEmail = response.getResponseText().trim().toLowerCase();
+  if (!targetEmail) {
+    ui.alert('No email provided');
+    return;
+  }
+
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+  const data = sheet.getRange(2, 1, lastRow - 1, 14).getValues();
+
+  const props = PropertiesService.getScriptProperties();
+  const apiKey = props.getProperty('API_KEY');
+
+  if (!apiKey) {
+    ui.alert('ERROR: API_KEY not set!');
+    return;
+  }
+
+  for (const row of data) {
+    const email = String(row[4]).toLowerCase().trim();
+
+    if (email === targetEmail) {
+      const candidate = {
+        submittedAt: formatDate(row[0]),
+        time: row[1],
+        firstName: row[2],
+        lastName: row[3],
+        email: row[4],
+        phone: String(row[5] || ''),
+        birthDate: formatDate(row[6]),
+        height: row[7],
+        instagram: row[8],
+        tiktok: row[9],
+        city: row[10],
+        category: row[11],
+        photoFolderUrl: row[13] || ''
+      };
+
+      if (candidate.photoFolderUrl) {
+        candidate.photoUrls = getPhotoUrlsFromFolder(candidate.photoFolderUrl);
+      } else {
+        candidate.photoUrls = [];
+      }
+
+      const response = UrlFetchApp.fetch(PUSH_CONFIG.WEB_APP_URL, {
+        method: 'POST',
+        contentType: 'application/json',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`
+        },
+        payload: JSON.stringify(candidate),
+        muteHttpExceptions: true
+      });
+
+      const code = response.getResponseCode();
+      if (code === 201) {
+        ui.alert(`✓ Pushed ${candidate.firstName} ${candidate.lastName} (${candidate.email}) with ${candidate.photoUrls.length} photos`);
+      } else if (code === 409) {
+        ui.alert(`○ Candidate already exists: ${candidate.email}`);
+      } else {
+        ui.alert(`✗ Error: ${response.getContentText()}`);
+      }
+
+      return;
+    }
+  }
+
+  ui.alert(`Candidate not found: ${targetEmail}`);
+}
+
+/**
+ * Menu for easy access
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('EFI Web App')
+    .addItem('Push New Candidates Now', 'pushNewCandidatesToWebApp')
+    .addItem('Push Single Candidate', 'pushSingleCandidate')
+    .addItem('Test Connection', 'testConnection')
+    .addSeparator()
+    .addItem('Setup Auto-Push (Every 10 min)', 'setupPushTrigger')
+    .addItem('Remove Auto-Push', 'removePushTrigger')
+    .addSeparator()
+    .addItem('Reset (Re-push All)', 'resetLastPushedRow')
+    .addToUi();
+}

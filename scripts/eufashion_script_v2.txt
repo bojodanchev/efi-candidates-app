@@ -1,0 +1,583 @@
+/**
+ * EU Fashion Institute - Gmail Form Submission Extractor v2
+ * With Photo Extraction to Google Drive
+ *
+ * SETUP:
+ * 1. Open your Google Sheet with candidates
+ * 2. Go to Extensions → Apps Script
+ * 3. Replace existing code with this script
+ * 4. Run setupHeaders() once to add the PhotoFolder column
+ * 5. Run extractAllApplications() to extract with photos
+ */
+
+// Configuration
+const CONFIG = {
+  SEARCH_QUERY: 'subject:"New message from \\"Стани модел\\""',
+  BATCH_SIZE: 100,
+  MESSAGE_ID_COLUMN: 13,  // Column M - stores Gmail message ID
+  PHOTO_FOLDER_COLUMN: 14, // Column N - stores Google Drive folder URL
+  DRIVE_ROOT_FOLDER_NAME: 'EFI Candidates Photos'  // Root folder for all candidate photos
+};
+
+/**
+ * Main function - Run this to extract new emails with photos
+ */
+function extractAllApplications() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+
+  if (!sheet) {
+    Logger.log('ERROR: No sheet found!');
+    return;
+  }
+
+  Logger.log(`Using sheet: ${sheet.getName()}`);
+
+  // Set up headers if not present
+  if (sheet.getRange('A1').getValue() === '') {
+    setupHeaders(sheet);
+  }
+
+  // Get or create root folder for photos
+  const rootFolder = getOrCreateRootFolder();
+  Logger.log(`Photos will be saved to: ${rootFolder.getName()}`);
+
+  // Get existing message IDs to avoid duplicates (column M)
+  const existingMessageIds = getExistingMessageIds(sheet);
+  Logger.log(`Found ${existingMessageIds.size} existing entries`);
+
+  // Search Gmail
+  const threads = GmailApp.search(CONFIG.SEARCH_QUERY);
+  Logger.log(`Found ${threads.length} email threads`);
+
+  const newRows = [];
+
+  for (const thread of threads) {
+    const messages = thread.getMessages();
+
+    for (const message of messages) {
+      const messageId = message.getId();
+
+      // Skip if we already have this message
+      if (existingMessageIds.has(messageId)) {
+        continue;
+      }
+
+      const parsed = parseEmailBody(message.getPlainBody());
+
+      if (parsed && parsed.email) {
+        // Extract photos to Google Drive
+        let photoFolderUrl = '';
+        try {
+          photoFolderUrl = extractPhotosToGoogleDrive(message, parsed, rootFolder);
+        } catch (e) {
+          Logger.log(`Error extracting photos for ${parsed.email}: ${e}`);
+        }
+
+        newRows.push([
+          parsed.date,
+          parsed.time,
+          parsed.firstName,
+          parsed.lastName,
+          parsed.email,
+          parsed.phone,
+          parsed.birthDate,
+          parsed.height,
+          parsed.instagram,
+          parsed.tiktok,
+          parsed.city,
+          parsed.category,
+          messageId,       // Column M
+          photoFolderUrl   // Column N
+        ]);
+      }
+    }
+  }
+
+  if (newRows.length === 0) {
+    Logger.log('No new applications found');
+    return;
+  }
+
+  // Sort by date (newest first)
+  newRows.sort((a, b) => {
+    const dateA = parseDateTime(a[0], a[1]);
+    const dateB = parseDateTime(b[0], b[1]);
+    return dateB - dateA;
+  });
+
+  // INSERT at row 2 (after header), pushing existing data down
+  sheet.insertRowsAfter(1, newRows.length);
+  sheet.getRange(2, 1, newRows.length, 14).setValues(newRows);
+
+  Logger.log(`✓ Added ${newRows.length} new applications at the top`);
+
+  // Auto-resize columns (but not the hidden columns)
+  sheet.autoResizeColumns(1, 12);
+
+  // Hide the message ID column if not already hidden
+  if (!sheet.isColumnHiddenByUser(CONFIG.MESSAGE_ID_COLUMN)) {
+    sheet.hideColumns(CONFIG.MESSAGE_ID_COLUMN);
+  }
+
+  Logger.log(`DONE: Processed ${threads.length} threads, added ${newRows.length} new applications`);
+}
+
+/**
+ * Get or create the root folder for all candidate photos
+ */
+function getOrCreateRootFolder() {
+  const folders = DriveApp.getFoldersByName(CONFIG.DRIVE_ROOT_FOLDER_NAME);
+
+  if (folders.hasNext()) {
+    return folders.next();
+  }
+
+  // Create the root folder
+  const rootFolder = DriveApp.createFolder(CONFIG.DRIVE_ROOT_FOLDER_NAME);
+  Logger.log(`Created root folder: ${CONFIG.DRIVE_ROOT_FOLDER_NAME}`);
+  return rootFolder;
+}
+
+/**
+ * Extract photos from email attachments to Google Drive
+ * Returns the folder URL or empty string if no photos
+ */
+function extractPhotosToGoogleDrive(message, candidateData, rootFolder) {
+  const attachments = message.getAttachments();
+
+  if (!attachments || attachments.length === 0) {
+    Logger.log(`No attachments found for ${candidateData.email}`);
+    return '';
+  }
+
+  // Filter for image attachments
+  const imageAttachments = attachments.filter(att => {
+    const contentType = att.getContentType().toLowerCase();
+    return contentType.startsWith('image/');
+  });
+
+  if (imageAttachments.length === 0) {
+    Logger.log(`No image attachments for ${candidateData.email}`);
+    return '';
+  }
+
+  // Create folder name: "FirstName LastName - email"
+  const folderName = `${candidateData.firstName} ${candidateData.lastName} - ${candidateData.email}`;
+
+  // Check if folder already exists (shouldn't happen if message ID check works)
+  const existingFolders = rootFolder.getFoldersByName(folderName);
+  let candidateFolder;
+
+  if (existingFolders.hasNext()) {
+    candidateFolder = existingFolders.next();
+    Logger.log(`Using existing folder for ${candidateData.email}`);
+  } else {
+    candidateFolder = rootFolder.createFolder(folderName);
+    Logger.log(`Created folder for ${candidateData.email}`);
+  }
+
+  // Save each image
+  let savedCount = 0;
+  for (let i = 0; i < imageAttachments.length; i++) {
+    const attachment = imageAttachments[i];
+    const fileName = attachment.getName() || `photo_${i + 1}.jpg`;
+
+    try {
+      const file = candidateFolder.createFile(attachment);
+      file.setName(fileName);
+      savedCount++;
+      Logger.log(`  Saved: ${fileName}`);
+    } catch (e) {
+      Logger.log(`  Error saving ${fileName}: ${e}`);
+    }
+  }
+
+  Logger.log(`Saved ${savedCount} photos for ${candidateData.email}`);
+
+  // Return the folder URL
+  return candidateFolder.getUrl();
+}
+
+/**
+ * Get existing message IDs from column M
+ */
+function getExistingMessageIds(sheet) {
+  const lastRow = sheet.getLastRow();
+  const messageIds = new Set();
+
+  if (lastRow < 2) {
+    return messageIds;
+  }
+
+  const values = sheet.getRange(2, CONFIG.MESSAGE_ID_COLUMN, lastRow - 1, 1).getValues();
+
+  for (const row of values) {
+    if (row[0]) {
+      messageIds.add(String(row[0]));
+    }
+  }
+
+  return messageIds;
+}
+
+/**
+ * Parse date and time strings into a Date object for sorting
+ */
+function parseDateTime(dateStr, timeStr) {
+  try {
+    if (!dateStr) return new Date(0);
+
+    let date = new Date(dateStr);
+
+    if (timeStr && !isNaN(date.getTime())) {
+      const timeParts = String(timeStr).match(/(\d+):(\d+)/);
+      if (timeParts) {
+        date.setHours(parseInt(timeParts[1]), parseInt(timeParts[2]));
+      }
+    }
+
+    return isNaN(date.getTime()) ? new Date(0) : date;
+  } catch (e) {
+    return new Date(0);
+  }
+}
+
+/**
+ * Parse the email body to extract form fields
+ */
+function parseEmailBody(body) {
+  if (!body) {
+    return null;
+  }
+
+  try {
+    body = body.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const lines = body.split('\n');
+
+    const data = {
+      firstName: '',
+      lastName: '',
+      email: '',
+      phone: '',
+      birthDate: '',
+      height: '',
+      instagram: '',
+      tiktok: '',
+      city: '',
+      category: '',
+      date: '',
+      time: ''
+    };
+
+    const labelMap = {
+      'Име': 'firstName',
+      'Фамилия': 'lastName',
+      'Email': 'email',
+      'Телефон за връзка': 'phone',
+      'Дата на раждане': 'birthDate',
+      'Височина в см.': 'height',
+      'Височина в см': 'height',
+      'Instagram link': 'instagram',
+      'Tik Tok link': 'tiktok',
+      'TikTok link': 'tiktok',
+      'Град в който живеете в момента': 'city',
+      'Категория': 'category',
+      'Date': 'date',
+      'Time': 'time'
+    };
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+
+      const colonMatch = line.match(/^([^:]+?):{1,2}\s*(.*)$/);
+
+      if (colonMatch) {
+        const label = colonMatch[1].trim();
+        let value = colonMatch[2].trim();
+        const key = labelMap[label];
+
+        if (key) {
+          if (key === 'instagram' || key === 'tiktok') {
+            const urlMatch = value.match(/^(https?:\/\/[^\s]+)/);
+            if (urlMatch) {
+              value = urlMatch[1];
+            } else if (value && !value.startsWith('http')) {
+              value = '';
+            }
+          }
+
+          if (key === 'city') {
+            value = value.split('http')[0].trim();
+            value = value.split('Категория')[0].trim();
+          }
+
+          data[key] = value;
+        }
+      }
+    }
+
+    if (!data.email) {
+      return null;
+    }
+
+    return data;
+  } catch (e) {
+    Logger.log(`Error parsing email: ${e}`);
+    return null;
+  }
+}
+
+/**
+ * Set up sheet headers (including new PhotoFolder column)
+ */
+function setupHeaders(sheet) {
+  const headers = [
+    'Date', 'Time', 'Име', 'Фамилия', 'Email', 'Телефон',
+    'Дата на раждане', 'Височина (см)', 'Instagram', 'TikTok', 'Град', 'Категория',
+    'MessageID', 'PhotoFolderURL'
+  ];
+
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#f3f3f3');
+  sheet.setFrozenRows(1);
+
+  // Hide the MessageID column
+  sheet.hideColumns(CONFIG.MESSAGE_ID_COLUMN);
+}
+
+/**
+ * Menu for easy access
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('EU Fashion Tools')
+    .addItem('Extract New Applications (with Photos)', 'extractAllApplications')
+    .addItem('Clear and Re-extract All', 'clearAndReextract')
+    .addSeparator()
+    .addItem('Remove Duplicates', 'removeDuplicates')
+    .addItem('Sort by Date (Newest First)', 'sortByDateDescending')
+    .addSeparator()
+    .addItem('Setup Auto-Sync (10 min)', 'setupAutoSync')
+    .addItem('Remove Auto-Sync', 'removeAutoSync')
+    .addToUi();
+}
+
+/**
+ * Clear and re-extract
+ */
+function clearAndReextract() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.alert(
+    'Confirm Clear',
+    'This will delete all data and re-extract from Gmail.\nNote: Photos already saved to Drive will remain.\n\nContinue?',
+    ui.ButtonSet.YES_NO
+  );
+
+  if (response === ui.Button.YES) {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    sheet.clearContents();
+    extractAllApplications();
+  }
+}
+
+/**
+ * Remove duplicate rows based on MessageID or Email
+ */
+function removeDuplicates() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < 2) {
+    Logger.log('No data to deduplicate');
+    return;
+  }
+
+  const data = sheet.getRange(2, 1, lastRow - 1, 14).getValues();
+  const seen = new Set();
+  const rowsToDelete = [];
+
+  for (let i = 0; i < data.length; i++) {
+    const email = String(data[i][4]).toLowerCase().trim();
+    const messageId = data[i][12];
+    const key = messageId || email;
+
+    if (!key) continue;
+
+    if (seen.has(key)) {
+      rowsToDelete.push(i + 2);
+    } else {
+      seen.add(key);
+    }
+  }
+
+  rowsToDelete.reverse();
+  for (const row of rowsToDelete) {
+    sheet.deleteRow(row);
+  }
+
+  Logger.log(`Removed ${rowsToDelete.length} duplicate rows`);
+
+  if (rowsToDelete.length > 0) {
+    SpreadsheetApp.getUi().alert(`Removed ${rowsToDelete.length} duplicate rows`);
+  } else {
+    SpreadsheetApp.getUi().alert('No duplicates found');
+  }
+}
+
+/**
+ * Sort all data by date (newest first)
+ */
+function sortByDateDescending() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < 3) {
+    Logger.log('Not enough data to sort');
+    return;
+  }
+
+  const range = sheet.getRange(2, 1, lastRow - 1, 14);
+  range.sort([
+    {column: 1, ascending: false},
+    {column: 2, ascending: false}
+  ]);
+
+  Logger.log('Sorted by date (newest first)');
+  SpreadsheetApp.getUi().alert('Sorted by date (newest first)');
+}
+
+/**
+ * Set up automatic polling every 10 minutes
+ */
+function setupAutoSync() {
+  const triggers = ScriptApp.getProjectTriggers();
+  for (const trigger of triggers) {
+    if (trigger.getHandlerFunction() === 'extractAllApplications') {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  }
+
+  ScriptApp.newTrigger('extractAllApplications')
+    .timeBased()
+    .everyMinutes(10)
+    .create();
+
+  Logger.log('Auto-sync trigger created: extractAllApplications will run every 10 minutes');
+
+  try {
+    SpreadsheetApp.getUi().alert('Auto-sync enabled! Script will run every 10 minutes.');
+  } catch (e) {}
+}
+
+/**
+ * Remove the auto-sync trigger
+ */
+function removeAutoSync() {
+  const triggers = ScriptApp.getProjectTriggers();
+  let removed = 0;
+  for (const trigger of triggers) {
+    if (trigger.getHandlerFunction() === 'extractAllApplications') {
+      ScriptApp.deleteTrigger(trigger);
+      removed++;
+    }
+  }
+  Logger.log(`Removed ${removed} trigger(s) for extractAllApplications`);
+
+  try {
+    SpreadsheetApp.getUi().alert(`Removed ${removed} auto-sync trigger(s)`);
+  } catch (e) {}
+}
+
+/**
+ * Add PhotoFolderURL column to existing sheet
+ * Run this once if upgrading from v1
+ */
+function addPhotoColumn() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastCol = sheet.getLastColumn();
+
+  if (lastCol < 14) {
+    sheet.getRange(1, 14).setValue('PhotoFolderURL');
+    sheet.getRange(1, 14).setFontWeight('bold').setBackground('#f3f3f3');
+    Logger.log('Added PhotoFolderURL column');
+    SpreadsheetApp.getUi().alert('Added PhotoFolderURL column (Column N)');
+  } else {
+    SpreadsheetApp.getUi().alert('PhotoFolderURL column already exists');
+  }
+}
+
+/**
+ * Extract photos for existing candidates (migration helper)
+ * Run this to add photos for candidates already in the sheet
+ */
+function migratePhotosForExistingCandidates() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.alert(
+    'Migrate Photos',
+    'This will extract photos from Gmail for all existing candidates without photos.\nThis may take a while for many candidates.\n\nContinue?',
+    ui.ButtonSet.YES_NO
+  );
+
+  if (response !== ui.Button.YES) return;
+
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < 2) {
+    ui.alert('No candidates to migrate');
+    return;
+  }
+
+  const rootFolder = getOrCreateRootFolder();
+  const data = sheet.getRange(2, 1, lastRow - 1, 14).getValues();
+
+  // Build map of messageId -> row index (for candidates without photos)
+  const candidatesNeedingPhotos = [];
+  for (let i = 0; i < data.length; i++) {
+    const messageId = data[i][12];  // Column M
+    const photoUrl = data[i][13];   // Column N
+
+    if (messageId && !photoUrl) {
+      candidatesNeedingPhotos.push({
+        rowIndex: i + 2,  // Actual row in sheet
+        messageId: messageId,
+        firstName: data[i][2],
+        lastName: data[i][3],
+        email: data[i][4]
+      });
+    }
+  }
+
+  Logger.log(`Found ${candidatesNeedingPhotos.length} candidates needing photos`);
+
+  let processedCount = 0;
+  let photosAdded = 0;
+
+  for (const candidate of candidatesNeedingPhotos) {
+    try {
+      const message = GmailApp.getMessageById(candidate.messageId);
+      if (message) {
+        const folderUrl = extractPhotosToGoogleDrive(message, candidate, rootFolder);
+        if (folderUrl) {
+          sheet.getRange(candidate.rowIndex, CONFIG.PHOTO_FOLDER_COLUMN).setValue(folderUrl);
+          photosAdded++;
+        }
+      }
+    } catch (e) {
+      Logger.log(`Error processing ${candidate.email}: ${e}`);
+    }
+
+    processedCount++;
+
+    // Progress log every 10 candidates
+    if (processedCount % 10 === 0) {
+      Logger.log(`Processed ${processedCount}/${candidatesNeedingPhotos.length}`);
+    }
+
+    // Small delay to avoid rate limiting
+    Utilities.sleep(100);
+  }
+
+  Logger.log(`Migration complete: Added photos for ${photosAdded} candidates`);
+  ui.alert(`Migration complete!\n\nProcessed: ${processedCount}\nPhotos added: ${photosAdded}`);
+}
