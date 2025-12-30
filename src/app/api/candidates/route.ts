@@ -23,6 +23,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    // Check for silent mode (skip Telegram notifications for bulk imports)
+    const { searchParams } = new URL(request.url);
+    const silent = searchParams.get("silent") === "true";
+
     const body = await request.json();
 
     // Parse submitted date
@@ -68,27 +72,29 @@ export async function POST(request: NextRequest) {
       },
     });
 
-    // Send Telegram notification
-    const telegramMessage = formatCandidateMessage(candidate);
-    const inlineKeyboard = getInlineKeyboard(candidate.id);
+    // Send Telegram notification (skip in silent mode for bulk imports)
+    if (!silent) {
+      const telegramMessage = formatCandidateMessage(candidate);
+      const inlineKeyboard = getInlineKeyboard(candidate.id);
 
-    const telegramResponse = await sendTelegramMessage({
-      text: telegramMessage,
-      replyMarkup: inlineKeyboard,
-    });
-
-    // Save Telegram message ID for later editing
-    if (telegramResponse.ok) {
-      await prisma.candidate.update({
-        where: { id: candidate.id },
-        data: {
-          telegramMessageId: String(telegramResponse.result.message_id),
-          telegramChatId: String(telegramResponse.result.chat.id),
-        },
+      const telegramResponse = await sendTelegramMessage({
+        text: telegramMessage,
+        replyMarkup: inlineKeyboard,
       });
+
+      // Save Telegram message ID for later editing
+      if (telegramResponse.ok) {
+        await prisma.candidate.update({
+          where: { id: candidate.id },
+          data: {
+            telegramMessageId: String(telegramResponse.result.message_id),
+            telegramChatId: String(telegramResponse.result.chat.id),
+          },
+        });
+      }
     }
 
-    return NextResponse.json({ success: true, id: candidate.id }, { status: 201 });
+    return NextResponse.json({ success: true, id: candidate.id, silent }, { status: 201 });
   } catch (error) {
     console.error("Error creating candidate:", error);
     return NextResponse.json(

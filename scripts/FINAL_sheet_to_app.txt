@@ -28,6 +28,9 @@ const PUSH_CONFIG = {
   // Your Vercel deployment URL
   WEB_APP_URL: 'https://efi-candidates-app.vercel.app/api/candidates',
 
+  // Silent mode URL (no Telegram notifications - use for bulk imports)
+  WEB_APP_URL_SILENT: 'https://efi-candidates-app.vercel.app/api/candidates?silent=true',
+
   // Script property key for tracking progress
   LAST_ROW_KEY: 'LAST_PUSHED_ROW',
 
@@ -48,8 +51,9 @@ const PUSH_CONFIG = {
 
 /**
  * Push new candidates to the web app
+ * @param {boolean} silent - If true, skip Telegram notifications (for bulk imports)
  */
-function pushNewCandidates() {
+function pushNewCandidates(silent = false) {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
   const props = PropertiesService.getScriptProperties();
   const apiKey = props.getProperty('API_KEY');
@@ -119,9 +123,10 @@ function pushNewCandidates() {
       }
     }
 
-    // Send to API
+    // Send to API (use silent URL for bulk imports)
+    const apiUrl = silent ? PUSH_CONFIG.WEB_APP_URL_SILENT : PUSH_CONFIG.WEB_APP_URL;
     try {
-      const response = UrlFetchApp.fetch(PUSH_CONFIG.WEB_APP_URL, {
+      const response = UrlFetchApp.fetch(apiUrl, {
         method: 'POST',
         contentType: 'application/json',
         headers: { 'Authorization': `Bearer ${apiKey}` },
@@ -163,14 +168,15 @@ function pushNewCandidates() {
 }
 
 /**
- * Push ALL rows (reset and re-push)
+ * Push ALL rows (reset and re-push) - WITH Telegram notifications
  */
 function pushAllCandidates() {
   const ui = SpreadsheetApp.getUi();
   const response = ui.alert(
     'Push All Candidates',
     'This will attempt to push ALL candidates in the sheet.\n' +
-    'Existing ones will be skipped (409).\n\nContinue?',
+    'Existing ones will be skipped (409).\n' +
+    '⚠️ Telegram notifications will be sent!\n\nContinue?',
     ui.ButtonSet.YES_NO
   );
 
@@ -179,8 +185,33 @@ function pushAllCandidates() {
   // Reset last pushed row
   PropertiesService.getScriptProperties().setProperty(PUSH_CONFIG.LAST_ROW_KEY, '1');
 
-  // Run push
-  pushNewCandidates();
+  // Run push with notifications
+  pushNewCandidates(false);
+}
+
+/**
+ * BULK IMPORT - Push ALL rows WITHOUT Telegram notifications
+ * Use this for initial data migration / large imports
+ */
+function bulkImportSilent() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.alert(
+    '🔇 Bulk Import (Silent Mode)',
+    'This will push ALL candidates WITHOUT Telegram notifications.\n' +
+    'Existing ones will be skipped (409).\n' +
+    'Perfect for bulk data migration.\n\nContinue?',
+    ui.ButtonSet.YES_NO
+  );
+
+  if (response !== ui.Button.YES) return;
+
+  Logger.log('🔇 BULK IMPORT - Silent mode (no Telegram notifications)');
+
+  // Reset last pushed row
+  PropertiesService.getScriptProperties().setProperty(PUSH_CONFIG.LAST_ROW_KEY, '1');
+
+  // Run push WITHOUT notifications
+  pushNewCandidates(true);
 }
 
 // ============================================================
@@ -405,6 +436,7 @@ function onOpen() {
     .createMenu('🚀 Push to App')
     .addItem('📤 Push New Candidates', 'pushNewCandidates')
     .addItem('📤 Push ALL Candidates', 'pushAllCandidates')
+    .addItem('🔇 Bulk Import (Silent)', 'bulkImportSilent')
     .addItem('📤 Push Single (by email)', 'pushSingleCandidate')
     .addSeparator()
     .addItem('🔌 Test Connection', 'testConnection')

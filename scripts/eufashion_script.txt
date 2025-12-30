@@ -1,94 +1,155 @@
 /**
  * EU Fashion Institute - Gmail Form Submission Extractor
  * Extracts candidate applications from Gmail and populates Google Sheets
+ *
+ * FIXES:
+ * - Uses Gmail Message ID for bulletproof duplicate detection
+ * - Inserts new rows at top (row 2, after header)
+ * - Newest submissions always appear first
  */
 
 // Configuration
 const CONFIG = {
   SEARCH_QUERY: 'subject:"New message from \\"Стани модел\\""',
-  BATCH_SIZE: 100
+  BATCH_SIZE: 100,
+  MESSAGE_ID_COLUMN: 13  // Column M - stores Gmail message ID for duplicate detection
 };
 
 /**
- * Main function - Run this to extract all emails
+ * Main function - Run this to extract new emails
  */
 function extractAllApplications() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-  
+
   if (!sheet) {
     Logger.log('ERROR: No sheet found!');
     return;
   }
-  
+
   Logger.log(`Using sheet: ${sheet.getName()}`);
-  
+
   // Set up headers if not present
   if (sheet.getRange('A1').getValue() === '') {
     setupHeaders(sheet);
   }
-  
-  // Get existing emails to avoid duplicates
-  const existingData = sheet.getDataRange().getValues();
-  const existingKeys = new Set();
-  for (let i = 1; i < existingData.length; i++) {
-    const key = `${existingData[i][4]}_${existingData[i][0]}`;
-    existingKeys.add(key);
-  }
-  
+
+  // Get existing message IDs to avoid duplicates (column M)
+  const existingMessageIds = getExistingMessageIds(sheet);
+  Logger.log(`Found ${existingMessageIds.size} existing entries`);
+
   // Search Gmail
   const threads = GmailApp.search(CONFIG.SEARCH_QUERY);
   Logger.log(`Found ${threads.length} email threads`);
-  
+
   const newRows = [];
-  
+
   for (const thread of threads) {
     const messages = thread.getMessages();
-    
+
     for (const message of messages) {
+      const messageId = message.getId();
+
+      // Skip if we already have this message
+      if (existingMessageIds.has(messageId)) {
+        continue;
+      }
+
       const parsed = parseEmailBody(message.getPlainBody());
-      
-      if (parsed) {
-        const key = `${parsed.email}_${parsed.date}`;
-        
-        if (!existingKeys.has(key)) {
-          newRows.push([
-            parsed.date,
-            parsed.time,
-            parsed.firstName,
-            parsed.lastName,
-            parsed.email,
-            parsed.phone,
-            parsed.birthDate,
-            parsed.height,
-            parsed.instagram,
-            parsed.tiktok,
-            parsed.city,
-            parsed.category
-          ]);
-          existingKeys.add(key);
-        }
+
+      if (parsed && parsed.email) {
+        newRows.push([
+          parsed.date,
+          parsed.time,
+          parsed.firstName,
+          parsed.lastName,
+          parsed.email,
+          parsed.phone,
+          parsed.birthDate,
+          parsed.height,
+          parsed.instagram,
+          parsed.tiktok,
+          parsed.city,
+          parsed.category,
+          messageId  // Store message ID in column M
+        ]);
       }
     }
   }
-  
+
+  if (newRows.length === 0) {
+    Logger.log('No new applications found');
+    return;
+  }
+
   // Sort by date (newest first)
   newRows.sort((a, b) => {
-    const dateA = new Date(a[0]);
-    const dateB = new Date(b[0]);
+    const dateA = parseDateTime(a[0], a[1]);
+    const dateB = parseDateTime(b[0], b[1]);
     return dateB - dateA;
   });
-  
-  // Append to sheet
-  if (newRows.length > 0) {
-    const startRow = sheet.getLastRow() + 1;
-    sheet.getRange(startRow, 1, newRows.length, 12).setValues(newRows);
-    Logger.log(`Added ${newRows.length} new applications`);
-  } else {
-    Logger.log('No new applications found');
-  }
-  
+
+  // INSERT at row 2 (after header), pushing existing data down
+  sheet.insertRowsAfter(1, newRows.length);
+  sheet.getRange(2, 1, newRows.length, 13).setValues(newRows);
+
+  Logger.log(`✓ Added ${newRows.length} new applications at the top`);
+
+  // Auto-resize columns (but not the hidden message ID column)
   sheet.autoResizeColumns(1, 12);
+
+  // Hide the message ID column if not already hidden
+  if (!sheet.isColumnHiddenByUser(CONFIG.MESSAGE_ID_COLUMN)) {
+    sheet.hideColumns(CONFIG.MESSAGE_ID_COLUMN);
+  }
+
   Logger.log(`DONE: Processed ${threads.length} threads, added ${newRows.length} new applications`);
+}
+
+/**
+ * Get existing message IDs from column M
+ */
+function getExistingMessageIds(sheet) {
+  const lastRow = sheet.getLastRow();
+  const messageIds = new Set();
+
+  if (lastRow < 2) {
+    return messageIds;
+  }
+
+  // Get all values from column M (message ID column)
+  const values = sheet.getRange(2, CONFIG.MESSAGE_ID_COLUMN, lastRow - 1, 1).getValues();
+
+  for (const row of values) {
+    if (row[0]) {
+      messageIds.add(String(row[0]));
+    }
+  }
+
+  return messageIds;
+}
+
+/**
+ * Parse date and time strings into a Date object for sorting
+ */
+function parseDateTime(dateStr, timeStr) {
+  try {
+    if (!dateStr) return new Date(0);
+
+    // Try to parse the date
+    let date = new Date(dateStr);
+
+    // If time is provided, add it
+    if (timeStr && !isNaN(date.getTime())) {
+      const timeParts = String(timeStr).match(/(\d+):(\d+)/);
+      if (timeParts) {
+        date.setHours(parseInt(timeParts[1]), parseInt(timeParts[2]));
+      }
+    }
+
+    return isNaN(date.getTime()) ? new Date(0) : date;
+  } catch (e) {
+    return new Date(0);
+  }
 }
 
 /**
@@ -98,11 +159,11 @@ function parseEmailBody(body) {
   if (!body) {
     return null;
   }
-  
+
   try {
     body = body.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     const lines = body.split('\n');
-    
+
     const data = {
       firstName: '',
       lastName: '',
@@ -117,7 +178,7 @@ function parseEmailBody(body) {
       date: '',
       time: ''
     };
-    
+
     const labelMap = {
       'Име': 'firstName',
       'Фамилия': 'lastName',
@@ -134,17 +195,17 @@ function parseEmailBody(body) {
       'Date': 'date',
       'Time': 'time'
     };
-    
+
     for (const line of lines) {
       if (!line.trim()) continue;
-      
+
       const colonMatch = line.match(/^([^:]+?):{1,2}\s*(.*)$/);
-      
+
       if (colonMatch) {
         const label = colonMatch[1].trim();
         let value = colonMatch[2].trim();
         const key = labelMap[label];
-        
+
         if (key) {
           if (key === 'instagram' || key === 'tiktok') {
             const urlMatch = value.match(/^(https?:\/\/[^\s]+)/);
@@ -154,21 +215,21 @@ function parseEmailBody(body) {
               value = '';
             }
           }
-          
+
           if (key === 'city') {
             value = value.split('http')[0].trim();
             value = value.split('Категория')[0].trim();
           }
-          
+
           data[key] = value;
         }
       }
     }
-    
+
     if (!data.email) {
       return null;
     }
-    
+
     return data;
   } catch (e) {
     Logger.log(`Error parsing email: ${e}`);
@@ -182,12 +243,15 @@ function parseEmailBody(body) {
 function setupHeaders(sheet) {
   const headers = [
     'Date', 'Time', 'Име', 'Фамилия', 'Email', 'Телефон',
-    'Дата на раждане', 'Височина (см)', 'Instagram', 'TikTok', 'Град', 'Категория'
+    'Дата на раждане', 'Височина (см)', 'Instagram', 'TikTok', 'Град', 'Категория', 'MessageID'
   ];
-  
+
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#f3f3f3');
   sheet.setFrozenRows(1);
+
+  // Hide the MessageID column
+  sheet.hideColumns(CONFIG.MESSAGE_ID_COLUMN);
 }
 
 /**
@@ -196,8 +260,14 @@ function setupHeaders(sheet) {
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('EU Fashion Tools')
-    .addItem('Extract Applications from Gmail', 'extractAllApplications')
+    .addItem('Extract New Applications', 'extractAllApplications')
     .addItem('Clear and Re-extract All', 'clearAndReextract')
+    .addSeparator()
+    .addItem('Remove Duplicates', 'removeDuplicates')
+    .addItem('Sort by Date (Newest First)', 'sortByDateDescending')
+    .addSeparator()
+    .addItem('Setup Auto-Sync (10 min)', 'setupAutoSync')
+    .addItem('Remove Auto-Sync', 'removeAutoSync')
     .addToUi();
 }
 
@@ -206,12 +276,184 @@ function onOpen() {
  */
 function clearAndReextract() {
   const ui = SpreadsheetApp.getUi();
-  const response = ui.alert('Confirm Clear', 'Delete all data and re-extract?', ui.ButtonSet.YES_NO);
+  const response = ui.alert('Confirm Clear', 'Delete all data and re-extract from Gmail?', ui.ButtonSet.YES_NO);
 
   if (response === ui.Button.YES) {
     const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
     sheet.clearContents();
     extractAllApplications();
+  }
+}
+
+/**
+ * Remove duplicate rows based on Email column
+ * Keeps the first occurrence (newest, since they're at the top)
+ */
+function removeDuplicates() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < 2) {
+    Logger.log('No data to deduplicate');
+    return;
+  }
+
+  const data = sheet.getRange(2, 1, lastRow - 1, 13).getValues();
+  const seen = new Set();
+  const rowsToDelete = [];
+
+  // Go through data and mark duplicates
+  for (let i = 0; i < data.length; i++) {
+    const email = String(data[i][4]).toLowerCase().trim();  // Column E (index 4) is Email
+    const messageId = data[i][12];  // Column M is MessageID
+
+    // Use messageId if available, otherwise use email
+    const key = messageId || email;
+
+    if (!key) continue;
+
+    if (seen.has(key)) {
+      rowsToDelete.push(i + 2);  // +2 because data starts at row 2
+    } else {
+      seen.add(key);
+    }
+  }
+
+  // Delete rows from bottom to top to preserve row numbers
+  rowsToDelete.reverse();
+  for (const row of rowsToDelete) {
+    sheet.deleteRow(row);
+  }
+
+  Logger.log(`Removed ${rowsToDelete.length} duplicate rows`);
+
+  if (rowsToDelete.length > 0) {
+    SpreadsheetApp.getUi().alert(`Removed ${rowsToDelete.length} duplicate rows`);
+  } else {
+    SpreadsheetApp.getUi().alert('No duplicates found');
+  }
+}
+
+/**
+ * Sort all data by date (newest first)
+ */
+function sortByDateDescending() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < 3) {
+    Logger.log('Not enough data to sort');
+    return;
+  }
+
+  // Sort data range (excluding header) by Date column (A), then Time column (B)
+  const range = sheet.getRange(2, 1, lastRow - 1, 13);
+  range.sort([
+    {column: 1, ascending: false},  // Date descending
+    {column: 2, ascending: false}   // Time descending
+  ]);
+
+  Logger.log('Sorted by date (newest first)');
+  SpreadsheetApp.getUi().alert('Sorted by date (newest first)');
+}
+
+/**
+ * One-time migration: Add message IDs to existing rows
+ * Run this MANUALLY from the menu after updating to the new script
+ */
+function migrateAddMessageIds() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const lastRow = sheet.getLastRow();
+
+  if (lastRow < 2) {
+    Logger.log('No data to migrate');
+    return;
+  }
+
+  Logger.log(`Starting migration for ${lastRow - 1} rows...`);
+
+  // Add MessageID header if not exists
+  const currentHeaders = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  if (currentHeaders.length < 13 || currentHeaders[12] !== 'MessageID') {
+    sheet.getRange(1, 13).setValue('MessageID');
+    Logger.log('Added MessageID header');
+  }
+
+  // Build a map from Gmail: email -> messageId (use most recent message per email)
+  const threads = GmailApp.search(CONFIG.SEARCH_QUERY);
+  Logger.log(`Found ${threads.length} email threads in Gmail`);
+
+  const emailToMessageId = new Map();
+
+  for (const thread of threads) {
+    const messages = thread.getMessages();
+    for (const message of messages) {
+      const parsed = parseEmailBody(message.getPlainBody());
+      if (parsed && parsed.email) {
+        const emailKey = parsed.email.toLowerCase().trim();
+        // Store the message ID (later messages overwrite earlier ones - that's fine)
+        emailToMessageId.set(emailKey, message.getId());
+      }
+    }
+  }
+
+  Logger.log(`Built map with ${emailToMessageId.size} unique emails from Gmail`);
+
+  // Get all sheet data at once (faster than row by row)
+  const data = sheet.getRange(2, 1, lastRow - 1, 13).getValues();
+
+  let updated = 0;
+  let alreadyHasId = 0;
+  let notFound = 0;
+
+  for (let i = 0; i < data.length; i++) {
+    const existingMessageId = data[i][12];
+
+    // Skip if already has a message ID
+    if (existingMessageId) {
+      alreadyHasId++;
+      continue;
+    }
+
+    const email = String(data[i][4] || '').toLowerCase().trim();  // Column E (index 4)
+
+    if (!email) {
+      notFound++;
+      continue;
+    }
+
+    const messageId = emailToMessageId.get(email);
+
+    if (messageId) {
+      data[i][12] = messageId;
+      updated++;
+    } else {
+      notFound++;
+    }
+  }
+
+  // Write all data back at once
+  if (updated > 0) {
+    sheet.getRange(2, 1, lastRow - 1, 13).setValues(data);
+  }
+
+  // Hide the column
+  try {
+    sheet.hideColumns(13);
+  } catch (e) {
+    Logger.log('Could not hide column: ' + e);
+  }
+
+  Logger.log(`=== MIGRATION COMPLETE ===`);
+  Logger.log(`Updated: ${updated}`);
+  Logger.log(`Already had ID: ${alreadyHasId}`);
+  Logger.log(`Not found in Gmail: ${notFound}`);
+
+  // Only try to show UI alert if called from menu (not from trigger)
+  try {
+    SpreadsheetApp.getUi().alert(`Migration complete!\n\nUpdated: ${updated}\nAlready had ID: ${alreadyHasId}\nNot found: ${notFound}`);
+  } catch (e) {
+    // Called from trigger, can't show UI
   }
 }
 
