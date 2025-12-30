@@ -73,6 +73,7 @@ export default function Home() {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<StatusFilter>("all");
+  const [searchQuery, setSearchQuery] = useState("");
   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
   const [updating, setUpdating] = useState<string | null>(null);
 
@@ -103,7 +104,7 @@ export default function Home() {
     fetchCandidates();
   }, []);
 
-  // Update selected candidate when filter changes
+  // Update selected candidate when filter or search changes
   useEffect(() => {
     const filtered = filteredCandidates;
     if (filtered.length > 0 && (!selectedCandidate || !filtered.find(c => c.id === selectedCandidate.id))) {
@@ -111,7 +112,7 @@ export default function Home() {
     } else if (filtered.length === 0) {
       setSelectedCandidate(null);
     }
-  }, [filter, candidates]);
+  }, [filter, searchQuery, candidates]);
 
   const updateStatus = async (id: string, status: "APPROVED" | "REJECTED") => {
     setUpdating(id);
@@ -144,9 +145,20 @@ export default function Home() {
     });
   };
 
-  const filteredCandidates = filter === "all"
-    ? candidates
-    : candidates.filter(c => c.status === filter);
+  const filteredCandidates = candidates.filter(c => {
+    // Filter by status
+    const matchesStatus = filter === "all" || c.status === filter;
+
+    // Filter by search query (name or email)
+    const query = searchQuery.toLowerCase().trim();
+    const matchesSearch = !query ||
+      c.firstName.toLowerCase().includes(query) ||
+      c.lastName.toLowerCase().includes(query) ||
+      `${c.firstName} ${c.lastName}`.toLowerCase().includes(query) ||
+      c.email.toLowerCase().includes(query);
+
+    return matchesStatus && matchesSearch;
+  });
 
   const counts = {
     all: candidates.length,
@@ -187,13 +199,49 @@ export default function Home() {
       {/* Header */}
       <header className="flex-shrink-0 border-b border-[#2a2a2a] px-6 py-4">
         <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-bold text-[#c9a227] tracking-wide">
-              EFI CASTING
-            </h1>
-            <p className="text-xs text-[#555] mt-0.5">
-              European Fashion Institute
-            </p>
+          <div className="flex items-center gap-6">
+            <div>
+              <h1 className="text-xl font-bold text-[#c9a227] tracking-wide">
+                EFI CASTING
+              </h1>
+              <p className="text-xs text-[#555] mt-0.5">
+                European Fashion Institute
+              </p>
+            </div>
+
+            {/* Search Input */}
+            <div className="relative">
+              <input
+                type="text"
+                placeholder="Търси по име..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-64 px-4 py-2 pl-10 bg-[#1a1a1a] border border-[#333] rounded-lg text-white text-sm placeholder-[#555] focus:outline-none focus:border-[#c9a227] transition-colors"
+              />
+              <svg
+                className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#555]"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                />
+              </svg>
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery("")}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-[#555] hover:text-white"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              )}
+            </div>
           </div>
 
           {/* Filter Tabs */}
