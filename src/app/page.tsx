@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 
 interface ScheduledEmail {
   id: string;
@@ -30,6 +30,13 @@ interface Candidate {
   photoUrls: string[];
   emailSequenceStartedAt: string | null;
   scheduledEmails: ScheduledEmail[];
+}
+
+interface Pagination {
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
 }
 
 type StatusFilter = "all" | "PENDING" | "APPROVED" | "REJECTED";
@@ -72,47 +79,90 @@ const calculateAge = (birthDate: string | null): number | null => {
 export default function Home() {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<StatusFilter>("all");
+  const [pagination, setPagination] = useState<Pagination>({ page: 1, limit: 50, total: 0, totalPages: 0 });
+  const [availableCities, setAvailableCities] = useState<string[]>([]);
+
+  // Filters
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [cityFilter, setCityFilter] = useState<string>("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [minAge, setMinAge] = useState<string>("");
+  const [maxAge, setMaxAge] = useState<string>("");
+
   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
   const [updating, setUpdating] = useState<string | null>(null);
 
-  const fetchCandidates = async () => {
-    try {
-      const res = await fetch(`/api/candidates`);
-      const data = await res.json();
-      const allCandidates = data.candidates || [];
-      setCandidates(allCandidates);
+  // Counts for tabs (separate fetch for totals)
+  const [counts, setCounts] = useState({ all: 0, PENDING: 0, APPROVED: 0, REJECTED: 0 });
 
-      // Auto-select first candidate if none selected
-      if (!selectedCandidate && allCandidates.length > 0) {
-        const filtered = filter === "all"
-          ? allCandidates
-          : allCandidates.filter((c: Candidate) => c.status === filter);
-        if (filtered.length > 0) {
-          setSelectedCandidate(filtered[0]);
-        }
+  const fetchCandidates = useCallback(async (page = 1) => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      params.set("page", String(page));
+      params.set("limit", "50");
+
+      if (statusFilter !== "all") params.set("status", statusFilter);
+      if (cityFilter) params.set("city", cityFilter);
+      if (searchQuery) params.set("search", searchQuery);
+      if (minAge) params.set("minAge", minAge);
+      if (maxAge) params.set("maxAge", maxAge);
+
+      const res = await fetch(`/api/candidates?${params}`);
+      const data = await res.json();
+
+      setCandidates(data.candidates || []);
+      setPagination(data.pagination || { page: 1, limit: 50, total: 0, totalPages: 0 });
+      setAvailableCities(data.filters?.cities || []);
+
+      // Auto-select first candidate
+      if (data.candidates?.length > 0 && !selectedCandidate) {
+        setSelectedCandidate(data.candidates[0]);
       }
     } catch (error) {
       console.error("Failed to fetch candidates:", error);
     } finally {
       setLoading(false);
     }
+  }, [statusFilter, cityFilter, searchQuery, minAge, maxAge]);
+
+  // Fetch counts separately (without filters)
+  const fetchCounts = async () => {
+    try {
+      const [all, pending, approved, rejected] = await Promise.all([
+        fetch("/api/candidates?limit=1").then(r => r.json()),
+        fetch("/api/candidates?limit=1&status=PENDING").then(r => r.json()),
+        fetch("/api/candidates?limit=1&status=APPROVED").then(r => r.json()),
+        fetch("/api/candidates?limit=1&status=REJECTED").then(r => r.json()),
+      ]);
+      setCounts({
+        all: all.pagination?.total || 0,
+        PENDING: pending.pagination?.total || 0,
+        APPROVED: approved.pagination?.total || 0,
+        REJECTED: rejected.pagination?.total || 0,
+      });
+    } catch (error) {
+      console.error("Failed to fetch counts:", error);
+    }
   };
 
   useEffect(() => {
-    fetchCandidates();
+    fetchCandidates(1);
+    fetchCounts();
   }, []);
 
-  // Update selected candidate when filter or search changes
+  // Refetch when filters change
   useEffect(() => {
-    const filtered = filteredCandidates;
-    if (filtered.length > 0 && (!selectedCandidate || !filtered.find(c => c.id === selectedCandidate.id))) {
-      setSelectedCandidate(filtered[0]);
-    } else if (filtered.length === 0) {
-      setSelectedCandidate(null);
-    }
-  }, [filter, searchQuery, candidates]);
+    fetchCandidates(1);
+  }, [statusFilter, cityFilter, minAge, maxAge]);
+
+  // Debounced search
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      fetchCandidates(1);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
   const updateStatus = async (id: string, status: "APPROVED" | "REJECTED") => {
     setUpdating(id);
@@ -124,8 +174,8 @@ export default function Home() {
       });
 
       if (res.ok) {
-        await fetchCandidates();
-        // Update selected candidate with new status
+        await fetchCandidates(pagination.page);
+        await fetchCounts();
         if (selectedCandidate?.id === id) {
           setSelectedCandidate(prev => prev ? { ...prev, status } : null);
         }
@@ -145,27 +195,14 @@ export default function Home() {
     });
   };
 
-  const filteredCandidates = candidates.filter(c => {
-    // Filter by status
-    const matchesStatus = filter === "all" || c.status === filter;
-
-    // Filter by search query (name or email)
-    const query = searchQuery.toLowerCase().trim();
-    const matchesSearch = !query ||
-      c.firstName.toLowerCase().includes(query) ||
-      c.lastName.toLowerCase().includes(query) ||
-      `${c.firstName} ${c.lastName}`.toLowerCase().includes(query) ||
-      c.email.toLowerCase().includes(query);
-
-    return matchesStatus && matchesSearch;
-  });
-
-  const counts = {
-    all: candidates.length,
-    PENDING: candidates.filter((c) => c.status === "PENDING").length,
-    APPROVED: candidates.filter((c) => c.status === "APPROVED").length,
-    REJECTED: candidates.filter((c) => c.status === "REJECTED").length,
+  const clearFilters = () => {
+    setCityFilter("");
+    setMinAge("");
+    setMaxAge("");
+    setSearchQuery("");
   };
+
+  const hasActiveFilters = cityFilter || minAge || maxAge || searchQuery;
 
   const StatusBadge = ({ status }: { status: string }) => {
     const styles = {
@@ -249,9 +286,9 @@ export default function Home() {
             {(["all", "PENDING", "APPROVED", "REJECTED"] as const).map((status) => (
               <button
                 key={status}
-                onClick={() => setFilter(status)}
+                onClick={() => setStatusFilter(status)}
                 className={`text-sm font-medium pb-1 border-b-2 transition-colors ${
-                  filter === status
+                  statusFilter === status
                     ? "text-[#c9a227] border-[#c9a227]"
                     : "text-[#888] border-transparent hover:text-white"
                 }`}
@@ -264,80 +301,155 @@ export default function Home() {
             ))}
           </div>
         </div>
+
+        {/* Additional Filters Row */}
+        <div className="flex items-center gap-4 mt-4">
+          {/* City Filter */}
+          <select
+            value={cityFilter}
+            onChange={(e) => setCityFilter(e.target.value)}
+            className="px-3 py-1.5 bg-[#1a1a1a] border border-[#333] rounded-lg text-white text-sm focus:outline-none focus:border-[#c9a227]"
+          >
+            <option value="">Всички градове</option>
+            {availableCities.map((city) => (
+              <option key={city} value={city}>{city}</option>
+            ))}
+          </select>
+
+          {/* Age Range */}
+          <div className="flex items-center gap-2">
+            <span className="text-[#555] text-sm">Възраст:</span>
+            <input
+              type="number"
+              placeholder="от"
+              value={minAge}
+              onChange={(e) => setMinAge(e.target.value)}
+              className="w-16 px-2 py-1.5 bg-[#1a1a1a] border border-[#333] rounded-lg text-white text-sm focus:outline-none focus:border-[#c9a227]"
+            />
+            <span className="text-[#555]">-</span>
+            <input
+              type="number"
+              placeholder="до"
+              value={maxAge}
+              onChange={(e) => setMaxAge(e.target.value)}
+              className="w-16 px-2 py-1.5 bg-[#1a1a1a] border border-[#333] rounded-lg text-white text-sm focus:outline-none focus:border-[#c9a227]"
+            />
+          </div>
+
+          {/* Clear Filters */}
+          {hasActiveFilters && (
+            <button
+              onClick={clearFilters}
+              className="px-3 py-1.5 text-sm text-[#888] hover:text-white transition-colors"
+            >
+              Изчисти филтри
+            </button>
+          )}
+
+          {/* Results count */}
+          <span className="ml-auto text-sm text-[#555]">
+            {pagination.total} резултата
+          </span>
+        </div>
       </header>
 
       {/* Main Content - Split View */}
       <div className="flex-1 flex overflow-hidden">
         {/* Left Panel - Candidates List */}
-        <div className="w-[60%] border-r border-[#2a2a2a] overflow-y-auto">
-          {loading ? (
-            <div className="flex items-center justify-center h-full">
-              <div className="text-center">
-                <div className="animate-spin rounded-full h-8 w-8 border-2 border-[#c9a227] border-t-transparent mx-auto"></div>
-                <p className="mt-3 text-[#555] text-sm">Зареждане...</p>
+        <div className="w-[60%] border-r border-[#2a2a2a] flex flex-col">
+          <div className="flex-1 overflow-y-auto">
+            {loading ? (
+              <div className="flex items-center justify-center h-full">
+                <div className="text-center">
+                  <div className="animate-spin rounded-full h-8 w-8 border-2 border-[#c9a227] border-t-transparent mx-auto"></div>
+                  <p className="mt-3 text-[#555] text-sm">Зареждане...</p>
+                </div>
               </div>
-            </div>
-          ) : filteredCandidates.length === 0 ? (
-            <div className="flex items-center justify-center h-full">
-              <p className="text-[#555]">Няма намерени кандидати</p>
-            </div>
-          ) : (
-            <div>
-              {filteredCandidates.map((candidate) => {
-                const isSelected = selectedCandidate?.id === candidate.id;
-                const igPhoto = getInstagramPhoto(candidate.instagram);
-                const age = calculateAge(candidate.birthDate);
+            ) : candidates.length === 0 ? (
+              <div className="flex items-center justify-center h-full">
+                <p className="text-[#555]">Няма намерени кандидати</p>
+              </div>
+            ) : (
+              <div>
+                {candidates.map((candidate) => {
+                  const isSelected = selectedCandidate?.id === candidate.id;
+                  const igPhoto = getInstagramPhoto(candidate.instagram);
+                  const age = calculateAge(candidate.birthDate);
 
-                return (
-                  <div
-                    key={candidate.id}
-                    onClick={() => setSelectedCandidate(candidate)}
-                    className={`flex items-center gap-4 px-4 py-3 cursor-pointer border-l-2 transition-all ${
-                      isSelected
-                        ? "bg-[#1a1608] border-l-[#c9a227]"
-                        : "border-l-transparent hover:bg-[#141414] hover:border-l-[#333]"
-                    }`}
-                  >
-                    {/* Photo */}
-                    {igPhoto ? (
-                      <img
-                        src={igPhoto}
-                        alt={candidate.firstName}
-                        className="h-10 w-10 rounded-lg object-cover border border-[#2a2a2a]"
-                        onError={(e) => {
-                          e.currentTarget.style.display = 'none';
-                          e.currentTarget.nextElementSibling?.classList.remove('hidden');
-                        }}
-                      />
-                    ) : null}
-                    <div className={igPhoto ? 'hidden' : ''}>
-                      <InitialsAvatar firstName={candidate.firstName} lastName={candidate.lastName} />
-                    </div>
-
-                    {/* Info */}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium text-white truncate">
-                          {candidate.firstName} {candidate.lastName}
-                        </span>
+                  return (
+                    <div
+                      key={candidate.id}
+                      onClick={() => setSelectedCandidate(candidate)}
+                      className={`flex items-center gap-4 px-4 py-3 cursor-pointer border-l-2 transition-all ${
+                        isSelected
+                          ? "bg-[#1a1608] border-l-[#c9a227]"
+                          : "border-l-transparent hover:bg-[#141414] hover:border-l-[#333]"
+                      }`}
+                    >
+                      {/* Photo */}
+                      {igPhoto ? (
+                        <img
+                          src={igPhoto}
+                          alt={candidate.firstName}
+                          className="h-10 w-10 rounded-lg object-cover border border-[#2a2a2a]"
+                          onError={(e) => {
+                            e.currentTarget.style.display = 'none';
+                            e.currentTarget.nextElementSibling?.classList.remove('hidden');
+                          }}
+                        />
+                      ) : null}
+                      <div className={igPhoto ? 'hidden' : ''}>
+                        <InitialsAvatar firstName={candidate.firstName} lastName={candidate.lastName} />
                       </div>
-                      <div className="text-xs text-[#555] truncate">
-                        {candidate.category || "Без категория"}
+
+                      {/* Info */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-white truncate">
+                            {candidate.firstName} {candidate.lastName}
+                          </span>
+                        </div>
+                        <div className="text-xs text-[#555] truncate">
+                          {candidate.category || "Без категория"}
+                        </div>
                       </div>
-                    </div>
 
-                    {/* Stats */}
-                    <div className="flex items-center gap-4 text-xs text-[#888]">
-                      <span>{candidate.city || "-"}</span>
-                      <span>{candidate.heightCm ? `${candidate.heightCm} см` : "-"}</span>
-                      <span>{age ? `${age} год` : "-"}</span>
-                    </div>
+                      {/* Stats */}
+                      <div className="flex items-center gap-4 text-xs text-[#888]">
+                        <span>{candidate.city || "-"}</span>
+                        <span>{candidate.heightCm ? `${candidate.heightCm} см` : "-"}</span>
+                        <span>{age ? `${age} год` : "-"}</span>
+                      </div>
 
-                    {/* Status */}
-                    <StatusBadge status={candidate.status} />
-                  </div>
-                );
-              })}
+                      {/* Status */}
+                      <StatusBadge status={candidate.status} />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Pagination */}
+          {pagination.totalPages > 1 && (
+            <div className="flex-shrink-0 border-t border-[#2a2a2a] px-4 py-3 flex items-center justify-between">
+              <button
+                onClick={() => fetchCandidates(pagination.page - 1)}
+                disabled={pagination.page <= 1 || loading}
+                className="px-4 py-2 text-sm bg-[#1a1a1a] border border-[#333] rounded-lg text-white disabled:opacity-50 disabled:cursor-not-allowed hover:border-[#c9a227] transition-colors"
+              >
+                ← Предишна
+              </button>
+              <span className="text-sm text-[#888]">
+                Страница {pagination.page} от {pagination.totalPages}
+              </span>
+              <button
+                onClick={() => fetchCandidates(pagination.page + 1)}
+                disabled={pagination.page >= pagination.totalPages || loading}
+                className="px-4 py-2 text-sm bg-[#1a1a1a] border border-[#333] rounded-lg text-white disabled:opacity-50 disabled:cursor-not-allowed hover:border-[#c9a227] transition-colors"
+              >
+                Следваща →
+              </button>
             </div>
           )}
         </div>
@@ -553,7 +665,7 @@ function EmailSequenceTimeline({ emails }: { emails: ScheduledEmail[] }) {
     if (email.status === "FAILED") return "failed";
     if (email.status === "SENT" || email.sentAt) return "sent";
     const scheduledDate = new Date(email.scheduledFor);
-    if (scheduledDate <= now) return "pending"; // Should have been sent by now
+    if (scheduledDate <= now) return "pending";
     return "future";
   };
 

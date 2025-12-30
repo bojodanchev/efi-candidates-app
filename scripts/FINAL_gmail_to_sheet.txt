@@ -159,10 +159,10 @@ function runIncrementalSync() {
 
 /**
  * Process threads and add new entries to sheet
+ * FIXED: Writes each row immediately to prevent data loss on timeout
  */
 function processThreads(threads, existingIds, sheet) {
   let added = 0, skipped = 0, errors = 0;
-  const newRows = [];
 
   // Get or create Drive folder
   let driveFolder = null;
@@ -220,27 +220,20 @@ function processThreads(threads, existingIds, sheet) {
 
       // Build row
       const row = buildRow(parsed, messageId, photoFolderUrl);
-      newRows.push(row);
-      existingIds.add(messageId);
-      added++;
 
-      const minorTag = parsed.isMinor ? ' [MINOR]' : '';
-      Logger.log(`✓ ${parsed.firstName} ${parsed.lastName} (${parsed.email})${minorTag}`);
+      // WRITE IMMEDIATELY to sheet (prevents data loss on timeout)
+      try {
+        sheet.appendRow(row);
+        existingIds.add(messageId);
+        added++;
+
+        const minorTag = parsed.isMinor ? ' [MINOR]' : '';
+        Logger.log(`✓ ${parsed.firstName} ${parsed.lastName} (${parsed.email})${minorTag}`);
+      } catch (e) {
+        Logger.log(`Sheet write error: ${e}`);
+        errors++;
+      }
     }
-  }
-
-  // Insert new rows at top (after header)
-  if (newRows.length > 0) {
-    // Sort by date (newest first)
-    newRows.sort((a, b) => {
-      const dateA = parseDateTime(a[0], a[1]);
-      const dateB = parseDateTime(b[0], b[1]);
-      return dateB - dateA;
-    });
-
-    sheet.insertRowsAfter(1, newRows.length);
-    sheet.getRange(2, 1, newRows.length, CONFIG.TOTAL_COLUMNS).setValues(newRows);
-    sheet.autoResizeColumns(1, 12);
   }
 
   return { added, skipped, errors };
@@ -376,8 +369,20 @@ function buildRow(parsed, messageId, photoFolderUrl) {
 
 /**
  * Extract photos to Google Drive
+ * OPTIMIZED: Checks if folder exists BEFORE fetching attachments (slow)
  */
 function extractPhotos(message, candidateData, rootFolder) {
+  const folderName = `${candidateData.firstName} ${candidateData.lastName} - ${candidateData.email}`;
+
+  // CHECK IF FOLDER EXISTS FIRST - skip attachment fetching if so
+  const existing = rootFolder.getFoldersByName(folderName);
+  if (existing.hasNext()) {
+    const existingFolder = existing.next();
+    Logger.log(`  [SKIP] Photos already exist: ${folderName}`);
+    return existingFolder.getUrl();
+  }
+
+  // Only fetch attachments if folder doesn't exist (this is the slow part)
   const attachments = message.getAttachments();
   if (!attachments || attachments.length === 0) return '';
 
@@ -386,11 +391,8 @@ function extractPhotos(message, candidateData, rootFolder) {
   );
   if (images.length === 0) return '';
 
-  const folderName = `${candidateData.firstName} ${candidateData.lastName} - ${candidateData.email}`;
-
-  // Get or create folder
-  const existing = rootFolder.getFoldersByName(folderName);
-  const folder = existing.hasNext() ? existing.next() : rootFolder.createFolder(folderName);
+  // Create new folder
+  const folder = rootFolder.createFolder(folderName);
 
   // Save images
   for (let i = 0; i < images.length; i++) {
@@ -408,7 +410,13 @@ function extractPhotos(message, candidateData, rootFolder) {
 // ============================================================
 
 function setupSheet() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // ALWAYS use the FIRST sheet (index 0) - not whatever tab is active
+  const sheet = ss.getSheets()[0];
+
+  // Log which sheet we're using for debugging
+  Logger.log(`Using sheet: "${sheet.getName()}" (first sheet)`);
 
   if (sheet.getRange('A1').getValue() === '') {
     const headers = [

@@ -54,7 +54,15 @@ const PUSH_CONFIG = {
  * @param {boolean} silent - If true, skip Telegram notifications (for bulk imports)
  */
 function pushNewCandidates(silent = false) {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  // ALWAYS use the FIRST sheet (index 0) - not whatever tab is active
+  const sheet = ss.getSheets()[0];
+
+  Logger.log('========================================');
+  Logger.log(`PUSH START - ${silent ? 'SILENT MODE' : 'WITH NOTIFICATIONS'}`);
+  Logger.log(`Using sheet: "${sheet.getName()}" (first sheet)`);
+  Logger.log('========================================');
+
   const props = PropertiesService.getScriptProperties();
   const apiKey = props.getProperty('API_KEY');
 
@@ -83,6 +91,11 @@ function pushNewCandidates(silent = false) {
   const C = PUSH_CONFIG.COL;
 
   for (let i = 0; i < rows.length; i++) {
+    // Progress logging every 50 candidates
+    if (i > 0 && i % 50 === 0) {
+      Logger.log(`--- Progress: ${i}/${rows.length} (${pushed} pushed, ${skipped} skipped, ${errors} errors) ---`);
+    }
+
     const row = rows[i];
     const email = row[C.EMAIL];
 
@@ -194,18 +207,28 @@ function pushAllCandidates() {
  * Use this for initial data migration / large imports
  */
 function bulkImportSilent() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheets()[0];
+  const totalRows = sheet.getLastRow() - 1; // minus header
+
   const ui = SpreadsheetApp.getUi();
   const response = ui.alert(
     '🔇 Bulk Import (Silent Mode)',
-    'This will push ALL candidates WITHOUT Telegram notifications.\n' +
-    'Existing ones will be skipped (409).\n' +
-    'Perfect for bulk data migration.\n\nContinue?',
+    `This will push ${totalRows} candidates to the web app.\n\n` +
+    '✓ NO Telegram notifications will be sent\n' +
+    '✓ Photos will be extracted from Drive folders\n' +
+    '✓ Duplicates in web app will be skipped\n\n' +
+    `Sheet: "${sheet.getName()}"\n\nContinue?`,
     ui.ButtonSet.YES_NO
   );
 
   if (response !== ui.Button.YES) return;
 
-  Logger.log('🔇 BULK IMPORT - Silent mode (no Telegram notifications)');
+  Logger.log('========================================');
+  Logger.log('🔇 BULK IMPORT - Silent mode');
+  Logger.log(`Sheet: "${sheet.getName()}"`);
+  Logger.log(`Total rows to process: ${totalRows}`);
+  Logger.log('========================================');
 
   // Reset last pushed row
   PropertiesService.getScriptProperties().setProperty(PUSH_CONFIG.LAST_ROW_KEY, '1');
@@ -220,6 +243,7 @@ function bulkImportSilent() {
 
 /**
  * Get photo URLs from a Google Drive folder
+ * Uses lh3.googleusercontent.com format for better embedding support
  */
 function getPhotoUrls(folderUrl) {
   const urls = [];
@@ -237,13 +261,14 @@ function getPhotoUrls(folderUrl) {
       const file = files.next();
 
       if (file.getMimeType().startsWith('image/')) {
-        // Make publicly viewable
+        // Make publicly viewable (required for embedding)
         try {
           file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
         } catch (e) { /* already shared */ }
 
-        // Add direct URL
-        urls.push(`https://drive.google.com/uc?id=${file.getId()}`);
+        // Use lh3.googleusercontent.com format - works better for embedding
+        // This format bypasses CORS issues that affect drive.google.com/uc URLs
+        urls.push(`https://lh3.googleusercontent.com/d/${file.getId()}`);
       }
     }
   } catch (e) {

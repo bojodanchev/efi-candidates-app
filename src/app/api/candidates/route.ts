@@ -109,13 +109,51 @@ export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const status = searchParams.get("status");
+    const city = searchParams.get("city");
+    const minAge = searchParams.get("minAge");
+    const maxAge = searchParams.get("maxAge");
+    const search = searchParams.get("search");
     const page = parseInt(searchParams.get("page") || "1");
-    const limit = parseInt(searchParams.get("limit") || "20");
+    const limit = parseInt(searchParams.get("limit") || "50");
     const skip = (page - 1) * limit;
 
-    const where = status ? { status: status.toUpperCase() as "PENDING" | "APPROVED" | "REJECTED" } : {};
+    // Build where clause
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const where: any = {};
 
-    const [candidates, total] = await Promise.all([
+    if (status) {
+      where.status = status.toUpperCase() as "PENDING" | "APPROVED" | "REJECTED";
+    }
+
+    if (city) {
+      where.city = { contains: city, mode: "insensitive" };
+    }
+
+    // Age filter based on birthDate
+    if (minAge || maxAge) {
+      const today = new Date();
+      if (maxAge) {
+        // minAge means born BEFORE this date
+        const minBirthDate = new Date(today.getFullYear() - parseInt(maxAge) - 1, today.getMonth(), today.getDate());
+        where.birthDate = { ...where.birthDate, gte: minBirthDate.toISOString().split("T")[0] };
+      }
+      if (minAge) {
+        // maxAge means born AFTER this date
+        const maxBirthDate = new Date(today.getFullYear() - parseInt(minAge), today.getMonth(), today.getDate());
+        where.birthDate = { ...where.birthDate, lte: maxBirthDate.toISOString().split("T")[0] };
+      }
+    }
+
+    // Search by name or email
+    if (search) {
+      where.OR = [
+        { firstName: { contains: search, mode: "insensitive" } },
+        { lastName: { contains: search, mode: "insensitive" } },
+        { email: { contains: search, mode: "insensitive" } },
+      ];
+    }
+
+    const [candidates, total, cities] = await Promise.all([
       prisma.candidate.findMany({
         where,
         orderBy: { createdAt: "desc" },
@@ -128,6 +166,12 @@ export async function GET(request: NextRequest) {
         },
       }),
       prisma.candidate.count({ where }),
+      // Get unique cities for filter dropdown
+      prisma.candidate.findMany({
+        select: { city: true },
+        distinct: ["city"],
+        where: { city: { not: null } },
+      }),
     ]);
 
     return NextResponse.json({
@@ -137,6 +181,9 @@ export async function GET(request: NextRequest) {
         limit,
         total,
         totalPages: Math.ceil(total / limit),
+      },
+      filters: {
+        cities: cities.map((c) => c.city).filter(Boolean).sort(),
       },
     });
   } catch (error) {
