@@ -156,7 +156,7 @@ export async function GET(request: NextRequest) {
     const [candidates, total, cities] = await Promise.all([
       prisma.candidate.findMany({
         where,
-        orderBy: { createdAt: "desc" },
+        orderBy: { submittedAt: "desc" },
         skip,
         take: limit,
         include: {
