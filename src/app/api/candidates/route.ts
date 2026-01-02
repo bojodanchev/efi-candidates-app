@@ -29,11 +29,11 @@ export async function POST(request: NextRequest) {
 
     const body = await request.json();
 
-    // Parse submitted date
+    // Parse submitted date from original form submission
     let submittedAt: Date;
-    if (body.submittedAt && body.time) {
-      // Combine date and time from Google Sheet format
-      const dateStr = `${body.submittedAt} ${body.time}`;
+    if (body.submittedAt) {
+      // Combine date and optional time from Google Sheet format
+      const dateStr = body.time ? `${body.submittedAt} ${body.time}` : body.submittedAt;
       submittedAt = new Date(dateStr);
       if (isNaN(submittedAt.getTime())) {
         submittedAt = new Date();

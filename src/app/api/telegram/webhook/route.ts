@@ -3,6 +3,13 @@ import { prisma } from "@/lib/prisma";
 import { addContactToBrevo } from "@/lib/brevo";
 import { editTelegramMessage, sendTelegramMessage } from "@/lib/telegram";
 
+// Email sequence configuration matching Brevo automation
+const EMAIL_SEQUENCE = [
+  { emailNumber: 1, templateId: 3, subject: "Твоят кастинг номер е генериран", delayHours: 0 },
+  { emailNumber: 2, templateId: 4, subject: "Кой всъщност ще те обучава?", delayHours: 24 },
+  { emailNumber: 3, templateId: 5, subject: "Поемам целия риск вместо теб", delayHours: 72 },
+];
+
 // POST /api/telegram/webhook - Handle Telegram callbacks
 export async function POST(request: NextRequest) {
   try {
@@ -52,6 +59,8 @@ export async function POST(request: NextRequest) {
 
       // If approved, add to Brevo for email sequence
       if (newStatus === "APPROVED") {
+        const sequenceStartedAt = new Date();
+
         try {
           const brevoResponse = await addContactToBrevo({
             email: candidate.email,
@@ -68,8 +77,22 @@ export async function POST(request: NextRequest) {
             where: { id: candidateId },
             data: {
               brevoContactId: brevoResponse.id?.toString(),
-              emailSequenceStartedAt: new Date(),
+              emailSequenceStartedAt: sequenceStartedAt,
             },
+          });
+
+          // Create scheduled email records for UI tracking
+          const scheduledEmails = EMAIL_SEQUENCE.map((email) => ({
+            candidateId,
+            emailNumber: email.emailNumber,
+            templateId: email.templateId,
+            subject: email.subject,
+            scheduledFor: new Date(sequenceStartedAt.getTime() + email.delayHours * 60 * 60 * 1000),
+          }));
+
+          await prisma.scheduledEmail.createMany({
+            data: scheduledEmails,
+            skipDuplicates: true,
           });
         } catch (brevoError) {
           console.error("Brevo error:", brevoError);
