@@ -144,12 +144,13 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Search by name or email
+    // Search by name, email, or phone
     if (search) {
       where.OR = [
         { firstName: { contains: search, mode: "insensitive" } },
         { lastName: { contains: search, mode: "insensitive" } },
         { email: { contains: search, mode: "insensitive" } },
+        { phone: { contains: search, mode: "insensitive" } },
       ];
     }
 

@@ -30,6 +30,15 @@ interface Candidate {
   photoUrls: string[];
   emailSequenceStartedAt: string | null;
   scheduledEmails: ScheduledEmail[];
+  // Sales tracking
+  salesStage: string | null;
+  salesNotes: string | null;
+  tags: string[];
+}
+
+interface Tag {
+  id: string;
+  name: string;
 }
 
 interface Pagination {
@@ -91,6 +100,7 @@ export default function Home() {
 
   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
   const [updating, setUpdating] = useState<string | null>(null);
+  const [availableTags, setAvailableTags] = useState<Tag[]>([]);
 
   // Counts for tabs (separate fetch for totals)
   const [counts, setCounts] = useState({ all: 0, PENDING: 0, APPROVED: 0, REJECTED: 0 });
@@ -146,9 +156,21 @@ export default function Home() {
     }
   };
 
+  // Fetch available tags
+  const fetchTags = async () => {
+    try {
+      const res = await fetch("/api/tags");
+      const data = await res.json();
+      setAvailableTags(data.tags || []);
+    } catch (error) {
+      console.error("Failed to fetch tags:", error);
+    }
+  };
+
   useEffect(() => {
     fetchCandidates(1);
     fetchCounts();
+    fetchTags();
   }, []);
 
   // Refetch when filters change
@@ -185,6 +207,47 @@ export default function Home() {
     } finally {
       setUpdating(null);
     }
+  };
+
+  const updateSalesData = async (id: string, data: { salesStage?: string | null; salesNotes?: string | null; tags?: string[] }) => {
+    try {
+      const res = await fetch(`/api/candidates/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+
+      if (res.ok) {
+        const updated = await res.json();
+        // Update selected candidate with new data
+        if (selectedCandidate?.id === id) {
+          setSelectedCandidate(prev => prev ? { ...prev, ...data } : null);
+        }
+        // Update in candidates list
+        setCandidates(prev => prev.map(c => c.id === id ? { ...c, ...updated } : c));
+      }
+    } catch (error) {
+      console.error("Failed to update sales data:", error);
+    }
+  };
+
+  const createTag = async (name: string) => {
+    try {
+      const res = await fetch("/api/tags", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        setAvailableTags(prev => [...prev, data.tag].sort((a, b) => a.name.localeCompare(b.name)));
+        return data.tag;
+      }
+    } catch (error) {
+      console.error("Failed to create tag:", error);
+    }
+    return null;
   };
 
   const formatDate = (dateString: string) => {
@@ -250,7 +313,7 @@ export default function Home() {
             <div className="relative">
               <input
                 type="text"
-                placeholder="Търси по име..."
+                placeholder="Търси по име, email, телефон..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="w-64 px-4 py-2 pl-10 bg-[#1a1a1a] border border-[#333] rounded-lg text-white text-sm placeholder-[#555] focus:outline-none focus:border-[#c9a227] transition-colors"
@@ -624,6 +687,16 @@ export default function Home() {
               {selectedCandidate.status === "APPROVED" && selectedCandidate.scheduledEmails && selectedCandidate.scheduledEmails.length > 0 && (
                 <EmailSequenceTimeline emails={selectedCandidate.scheduledEmails} />
               )}
+
+              {/* Sales Process Section - Only for approved candidates */}
+              {selectedCandidate.status === "APPROVED" && (
+                <SalesProcessSection
+                  candidate={selectedCandidate}
+                  availableTags={availableTags}
+                  onUpdateSalesData={(data) => updateSalesData(selectedCandidate.id, data)}
+                  onCreateTag={createTag}
+                />
+              )}
             </div>
           ) : (
             <div className="flex items-center justify-center h-full">
@@ -642,6 +715,198 @@ function DetailRow({ label, value }: { label: string; value: string }) {
     <div className="flex justify-between py-2 border-b border-[#222]">
       <span className="text-[#555] text-sm">{label}</span>
       <span className="text-white text-sm">{value}</span>
+    </div>
+  );
+}
+
+// Sales stages configuration
+const SALES_STAGES = [
+  { id: "contacted", label: "Contacted", labelBg: "Контактуван" },
+  { id: "presentation_scheduled", label: "Presentation Scheduled", labelBg: "Уговорена презентация" },
+  { id: "presentation_done", label: "Presentation Done", labelBg: "Презентация направена" },
+  { id: "contract_sent", label: "Contract Sent", labelBg: "Договор изпратен" },
+  { id: "signed", label: "Signed", labelBg: "Подписан" },
+];
+
+// Sales Process Section Component
+function SalesProcessSection({
+  candidate,
+  availableTags,
+  onUpdateSalesData,
+  onCreateTag,
+}: {
+  candidate: Candidate;
+  availableTags: Tag[];
+  onUpdateSalesData: (data: { salesStage?: string | null; salesNotes?: string | null; tags?: string[] }) => void;
+  onCreateTag: (name: string) => Promise<Tag | null>;
+}) {
+  const [notes, setNotes] = useState(candidate.salesNotes || "");
+  const [showNewTagInput, setShowNewTagInput] = useState(false);
+  const [newTagName, setNewTagName] = useState("");
+  const [savingNotes, setSavingNotes] = useState(false);
+
+  // Update notes when candidate changes
+  useEffect(() => {
+    setNotes(candidate.salesNotes || "");
+  }, [candidate.id, candidate.salesNotes]);
+
+  const handleStageChange = (stageId: string) => {
+    onUpdateSalesData({ salesStage: stageId });
+  };
+
+  const handleTagToggle = (tagName: string) => {
+    const currentTags = candidate.tags || [];
+    const newTags = currentTags.includes(tagName)
+      ? currentTags.filter(t => t !== tagName)
+      : [...currentTags, tagName];
+    onUpdateSalesData({ tags: newTags });
+  };
+
+  const handleCreateTag = async () => {
+    if (!newTagName.trim()) return;
+    const tag = await onCreateTag(newTagName.trim());
+    if (tag) {
+      // Also add the new tag to the candidate
+      const currentTags = candidate.tags || [];
+      onUpdateSalesData({ tags: [...currentTags, tag.name] });
+      setNewTagName("");
+      setShowNewTagInput(false);
+    }
+  };
+
+  const handleSaveNotes = async () => {
+    setSavingNotes(true);
+    await onUpdateSalesData({ salesNotes: notes });
+    setSavingNotes(false);
+  };
+
+  const currentStageIndex = SALES_STAGES.findIndex(s => s.id === candidate.salesStage);
+
+  return (
+    <div className="mt-6">
+      <h3 className="text-xs font-semibold text-[#c9a227] uppercase tracking-wider mb-4">
+        Sales Process
+      </h3>
+
+      {/* Stage Selector */}
+      <div className="space-y-2 mb-6">
+        {SALES_STAGES.map((stage, index) => {
+          const isCompleted = currentStageIndex >= 0 && index < currentStageIndex;
+          const isCurrent = stage.id === candidate.salesStage;
+          const isPending = currentStageIndex < 0 || index > currentStageIndex;
+
+          return (
+            <button
+              key={stage.id}
+              onClick={() => handleStageChange(stage.id)}
+              className={`w-full flex items-center gap-3 p-3 rounded-lg text-left transition-all ${
+                isCurrent
+                  ? "bg-[#c9a227]/20 border border-[#c9a227]"
+                  : isCompleted
+                  ? "bg-green-900/20 border border-green-800/50"
+                  : "bg-[#1a1a1a] border border-[#333] hover:border-[#555]"
+              }`}
+            >
+              <span className={`flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-sm ${
+                isCurrent
+                  ? "bg-[#c9a227] text-black"
+                  : isCompleted
+                  ? "bg-green-600 text-white"
+                  : "bg-[#333] text-[#666]"
+              }`}>
+                {isCompleted ? "✓" : isCurrent ? "●" : "○"}
+              </span>
+              <span className={`text-sm ${
+                isCurrent ? "text-white font-medium" : isCompleted ? "text-green-400" : "text-[#888]"
+              }`}>
+                {stage.labelBg}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Tags Section */}
+      <div className="mb-6">
+        <h4 className="text-xs text-[#888] uppercase tracking-wider mb-2">Тагове</h4>
+        <div className="flex flex-wrap gap-2">
+          {availableTags.map((tag) => {
+            const isSelected = (candidate.tags || []).includes(tag.name);
+            return (
+              <button
+                key={tag.id}
+                onClick={() => handleTagToggle(tag.name)}
+                className={`px-3 py-1 rounded-full text-xs transition-all ${
+                  isSelected
+                    ? "bg-[#c9a227] text-black"
+                    : "bg-[#1a1a1a] border border-[#333] text-[#888] hover:border-[#c9a227] hover:text-white"
+                }`}
+              >
+                {tag.name}
+              </button>
+            );
+          })}
+          {showNewTagInput ? (
+            <div className="flex items-center gap-1">
+              <input
+                type="text"
+                value={newTagName}
+                onChange={(e) => setNewTagName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleCreateTag();
+                  if (e.key === "Escape") {
+                    setShowNewTagInput(false);
+                    setNewTagName("");
+                  }
+                }}
+                placeholder="Нов таг..."
+                className="w-24 px-2 py-1 bg-[#1a1a1a] border border-[#c9a227] rounded text-xs text-white focus:outline-none"
+                autoFocus
+              />
+              <button
+                onClick={handleCreateTag}
+                className="px-2 py-1 bg-[#c9a227] text-black text-xs rounded hover:bg-[#ddb52f]"
+              >
+                ✓
+              </button>
+              <button
+                onClick={() => {
+                  setShowNewTagInput(false);
+                  setNewTagName("");
+                }}
+                className="px-2 py-1 bg-[#333] text-white text-xs rounded hover:bg-[#444]"
+              >
+                ✕
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setShowNewTagInput(true)}
+              className="px-3 py-1 rounded-full text-xs bg-[#1a1a1a] border border-dashed border-[#555] text-[#555] hover:border-[#c9a227] hover:text-[#c9a227] transition-colors"
+            >
+              + Добави
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Notes Section */}
+      <div>
+        <h4 className="text-xs text-[#888] uppercase tracking-wider mb-2">Бележки</h4>
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="Добави бележки за този кандидат..."
+          className="w-full h-24 px-3 py-2 bg-[#1a1a1a] border border-[#333] rounded-lg text-white text-sm placeholder-[#555] focus:outline-none focus:border-[#c9a227] resize-none"
+        />
+        <button
+          onClick={handleSaveNotes}
+          disabled={savingNotes || notes === (candidate.salesNotes || "")}
+          className="mt-2 px-4 py-2 bg-[#c9a227] text-black text-sm font-medium rounded-lg hover:bg-[#ddb52f] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          {savingNotes ? "Запазване..." : "Запази бележки"}
+        </button>
+      </div>
     </div>
   );
 }

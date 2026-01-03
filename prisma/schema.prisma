@@ -35,6 +35,11 @@ model Candidate {
   brevoContactId String? @map("brevo_contact_id")
   emailSequenceStartedAt DateTime? @map("email_sequence_started_at")
 
+  // Sales tracking (for approved candidates)
+  salesStage String?  @map("sales_stage")
+  salesNotes String?  @map("sales_notes")
+  tags       String[] @default([])
+
   // Telegram tracking
   telegramMessageId String? @map("telegram_message_id")
   telegramChatId    String? @map("telegram_chat_id")
@@ -79,4 +84,12 @@ enum CandidateStatus {
   PENDING
   APPROVED
   REJECTED
+}
+
+model Tag {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("tags")
 }

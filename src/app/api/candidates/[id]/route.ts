@@ -50,7 +50,16 @@ export async function GET(
   }
 }
 
-// PATCH /api/candidates/:id - Update candidate status
+// Valid sales stages
+const SALES_STAGES = [
+  "contacted",
+  "presentation_scheduled",
+  "presentation_done",
+  "contract_sent",
+  "signed",
+] as const;
+
+// PATCH /api/candidates/:id - Update candidate status or sales tracking
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -58,11 +67,7 @@ export async function PATCH(
   try {
     const { id } = await params;
     const body = await request.json();
-    const { status } = body;
-
-    if (!["APPROVED", "REJECTED"].includes(status)) {
-      return NextResponse.json({ error: "Invalid status" }, { status: 400 });
-    }
+    const { status, salesStage, salesNotes, tags } = body;
 
     const candidate = await prisma.candidate.findUnique({
       where: { id },
@@ -72,13 +77,49 @@ export async function PATCH(
       return NextResponse.json({ error: "Candidate not found" }, { status: 404 });
     }
 
-    // Update status
+    // Build update data
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const updateData: any = {};
+
+    // Handle status update
+    if (status) {
+      if (!["APPROVED", "REJECTED"].includes(status)) {
+        return NextResponse.json({ error: "Invalid status" }, { status: 400 });
+      }
+      updateData.status = status;
+      updateData.reviewedAt = new Date();
+      updateData.reviewedBy = body.reviewedBy || "Admin";
+    }
+
+    // Handle sales stage update
+    if (salesStage !== undefined) {
+      if (salesStage !== null && !SALES_STAGES.includes(salesStage)) {
+        return NextResponse.json({ error: "Invalid sales stage" }, { status: 400 });
+      }
+      updateData.salesStage = salesStage;
+    }
+
+    // Handle sales notes update
+    if (salesNotes !== undefined) {
+      updateData.salesNotes = salesNotes;
+    }
+
+    // Handle tags update
+    if (tags !== undefined) {
+      if (!Array.isArray(tags)) {
+        return NextResponse.json({ error: "Tags must be an array" }, { status: 400 });
+      }
+      updateData.tags = tags;
+    }
+
+    // Update candidate
     const updated = await prisma.candidate.update({
       where: { id },
-      data: {
-        status,
-        reviewedAt: new Date(),
-        reviewedBy: body.reviewedBy || "Admin",
+      data: updateData,
+      include: {
+        scheduledEmails: {
+          orderBy: { emailNumber: "asc" },
+        },
       },
     });
 
@@ -125,8 +166,8 @@ export async function PATCH(
       }
     }
 
-    // Update Telegram message if we have the message ID
-    if (candidate.telegramMessageId && candidate.telegramChatId) {
+    // Update Telegram message if we have the message ID and status changed
+    if (status && candidate.telegramMessageId && candidate.telegramChatId) {
       const statusEmoji = status === "APPROVED" ? "✅" : "❌";
       const statusText = status === "APPROVED" ? "ОДОБРЕН" : "ОТХВЪРЛЕН";
 
